@@ -48,13 +48,25 @@ export const PACKS = [
   { id: 'celestial', name: 'Thiên Giới Vĩnh Hằng', subtitle: 'Nơi những huyền thoại hội tụ', price: 350, element: 'light', tag: 'BẢO ĐẢM 1 THẺ SỬ THI', guarantee: 'epic' },
 ];
 export const STARTER_DECK = ['fire-0', 'fire-0', 'water-0', 'water-0', 'nature-0', 'nature-0', 'lightning-0', 'lightning-0', 'light-1', 'light-1', 'shadow-2', 'shadow-2', 'nature-4', 'nature-4', 'fire-8', 'water-8', 'spell-2', 'spell-2', 'spell-5', 'spell-0'];
-export function rollPack(pack, rng = Math.random) {
+export const DEFAULT_CARDS = structuredClone(CARDS);
+export const DEFAULT_PACKS = structuredClone(PACKS);
+export function applyCatalog(cards, packs) {
+  CARDS.splice(0, CARDS.length, ...structuredClone(cards));
+  for (const id of Object.keys(CARD_MAP)) delete CARD_MAP[id];
+  Object.assign(CARD_MAP, Object.fromEntries(CARDS.map(c => [c.id, c])));
+  PACKS.splice(0, PACKS.length, ...structuredClone(packs));
+}
+export function rollPack(pack, rng = Math.random, catalog = CARDS) {
+  const active = catalog.filter(c => c.enabled !== false);
   return Array.from({ length: 5 }, (_, i) => {
-    const roll = rng();
-    let rarity = roll < .025 ? 'legendary' : roll < .14 ? 'epic' : roll < .44 ? 'rare' : 'common';
+    const weights = pack.weights || { legendary: 2.5, epic: 11.5, rare: 30, common: 56 };
+    let roll = rng() * 100, rarity = 'common';
+    for (const key of ['legendary', 'epic', 'rare', 'common']) { roll -= weights[key]; if (roll < 0) { rarity = key; break; } }
     if (i === 4 && RARITIES[rarity].rank < RARITIES[pack.guarantee].rank) rarity = pack.guarantee;
-    let pool = CARDS.filter(c => c.rarity === rarity);
-    if (pack.id !== 'origin' && rng() < .7) pool = pool.filter(c => c.element === pack.element);
+    let pool = active.filter(c => c.rarity === rarity);
+    const bias = pack.elementBias ?? (pack.id === 'origin' ? 0 : 70);
+    if (bias > 0 && rng() < bias / 100) { const elemental = pool.filter(c => c.element === pack.element); if (elemental.length) pool = elemental; }
+    if (!pool.length) throw new Error('Pack chưa có đủ thẻ theo độ hiếm.');
     return pool[Math.floor(rng() * pool.length)].id;
   });
 }

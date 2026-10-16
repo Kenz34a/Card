@@ -3,23 +3,26 @@ import { Store, hashToken, verifyPassword, hashPassword } from './store.js';
 import { CARDS, CARD_MAP, STARTER_DECK } from '../src/cards.js';
 import { freshState, purchasePack, validateDeck } from '../src/state.js';
 import { createBattle, playCard, attack, evolve, endTurn, aiStep, botDeck } from '../src/engine.js';
+import { management } from './management.js';
 
 class ApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const check = (condition, status, message) => { if (!condition) throw new ApiError(status, message); };
 const integer = (n, min, max) => Number.isSafeInteger(n) && n >= min && n <= max;
 const cardExists = id => typeof id === 'string' && Object.hasOwn(CARD_MAP, id);
 const day = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date());
-function settle(profile) {
+function settle(profile, settings) {
   const b = profile.battle;
   if (!b || b.winner === null || b.rewarded) return;
   b.rewarded = true; profile.matches++;
   if (b.mode === 'ai' && b.winner === 0) profile.wins++;
-  profile.coins += b.mode === 'local' ? 60 : b.winner === 0 ? 100 : 40;
+  const rules = b.rewardRules || settings;
+  b.rewardGold = b.mode === 'local' ? rules.localGold : b.winner === 0 ? rules.winGold : rules.lossGold;
+  profile.coins += b.rewardGold;
 }
-async function body(req) {
+async function body(req, limit = 65536) {
   check(req.headers['content-type']?.split(';')[0] === 'application/json', 415, 'Yêu cầu dữ liệu JSON.');
   let size = 0; const chunks = [];
-  for await (const chunk of req) { size += chunk.length; check(size <= 65536, 413, 'Dữ liệu quá lớn.'); chunks.push(chunk); }
+  for await (const chunk of req) { size += chunk.length; check(size <= limit, 413, 'Dữ liệu quá lớn.'); chunks.push(chunk); }
   try { const value = JSON.parse(Buffer.concat(chunks).toString('utf8')); check(value && typeof value === 'object' && !Array.isArray(value), 400, 'Dữ liệu không hợp lệ.'); return value; }
   catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(400, 'Dữ liệu JSON không hợp lệ.'); }
 }
@@ -40,6 +43,9 @@ export function createApi(store = new Store()) {
     const send = (status, value, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers }); res.end(JSON.stringify(value)); };
     try {
       const url = new URL(req.url, 'http://localhost'), route = url.pathname, method = req.method;
+      const config = store.config(), catalog = Object.fromEntries(config.cards.map(c => [c.id, c]));
+      const cardExists = id => typeof id === 'string' && Object.hasOwn(catalog, id);
+      if (route === '/api/catalog' && method === 'GET') { send(200, config); return; }
       if (method !== 'GET') {
         check(method === 'POST', 405, 'Phương thức không được hỗ trợ.');
         let sameOrigin = true;
@@ -52,6 +58,7 @@ export function createApi(store = new Store()) {
         check(typeof data.password === 'string' && data.password.length >= 8 && data.password.length <= 128, 400, 'Mật khẩu cần từ 8 đến 128 ký tự.');
         const ip = req.socket.remoteAddress; let user;
         if (route.endsWith('/register')) {
+          check(store.config().settings.registrationOpen, 403, 'Máy chủ đang tạm đóng đăng ký tài khoản mới.');
           limited(`register:${ip}`, 30, 3600_000);
           check(!store.byUsername(username), 409, 'Tên đăng nhập đã được sử dụng.');
           const name = typeof data.displayName === 'string' ? data.displayName.trim() : username;
@@ -71,17 +78,35 @@ export function createApi(store = new Store()) {
       }
       const token = cookieToken(req), user = store.session(token);
       check(user && !user.banned, 401, 'Vui lòng đăng nhập để tiếp tục.');
+      const authenticatedBody = async (limit) => {
+        const value = await body(req, limit);
+        const fresh = store.session(token);
+        check(fresh && !fresh.banned, 401, 'Phiên đăng nhập đã kết thúc hoặc tài khoản bị khóa.');
+        if (route.startsWith('/api/admin/')) check(fresh.role === 'admin', 403, 'Quyền quản trị đã thay đổi. Vui lòng tải lại.');
+        return value;
+      };
       store.db.prepare('UPDATE users SET last_seen=? WHERE id=?').run(Date.now(), user.id);
       if (route === '/api/auth/logout' && method === 'POST') {
         store.db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hashToken(token));
         send(200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '') }); return;
       }
       if (route === '/api/me' && method === 'GET') { send(200, store.account(store.user(user.id))); return; }
+      if (route === '/api/auth/password' && method === 'POST') {
+        const data = await authenticatedBody();
+        check(typeof data.oldPassword === 'string' && data.oldPassword.length <= 128 && verifyPassword(data.oldPassword, user.password_hash), 400, 'Mật khẩu hiện tại không đúng.');
+        check(typeof data.password === 'string' && data.password.length >= 8 && data.password.length <= 128, 400, 'Mật khẩu mới cần 8–128 ký tự.');
+        const next = store.transaction(() => { store.db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hashPassword(data.password), user.id); store.revokeSessions(user.id); return store.newSession(user.id); });
+        send(200, store.account(store.user(user.id)), { 'Set-Cookie': sessionCookie(req, next) }); return;
+      }
       if (route.startsWith('/api/admin/')) {
         check(user.role === 'admin', 403, 'Chỉ quản trị viên mới có quyền thực hiện thao tác này.');
+        const managed = await management(store, user, route, method, () => authenticatedBody(route === '/api/admin/config' ? 1048576 : 65536));
+        if (managed !== undefined) { send(200, managed); return; }
         if (route === '/api/admin/overview' && method === 'GET') {
           const stats = store.db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(banned),0) AS banned,
             COALESCE(SUM(CASE WHEN last_seen>? AND banned=0 THEN 1 ELSE 0 END),0) AS online FROM users`).get(Date.now() - 300_000);
+          Object.assign(stats, { gold: 0, cards: 0, matches: 0, packs: 0, activeBattles: 0 });
+          for (const row of store.db.prepare('SELECT profile FROM users').all()) { const p = JSON.parse(row.profile); stats.gold += p.coins; stats.cards += Object.values(p.collection).reduce((a, n) => a + n, 0); stats.matches += p.matches; stats.packs += p.packsOpened; if (p.battle?.winner === null) stats.activeBattles++; }
           const audit = store.db.prepare(`SELECT audit.*, COALESCE(a.username,audit.actor) AS actorName, COALESCE(t.username,audit.target) AS targetName
             FROM audit LEFT JOIN users a ON a.id=audit.actor LEFT JOIN users t ON t.id=audit.target ORDER BY audit.id DESC LIMIT 30`).all();
           send(200, { stats, audit }); return;
@@ -98,7 +123,7 @@ export function createApi(store = new Store()) {
         const [, id, operation] = match, target = store.user(id); check(target, 404, 'Người chơi không tồn tại.');
         if (!operation && method === 'GET') { send(200, store.account(target)); return; }
         check(operation && method === 'POST', 405, 'Phương thức không được hỗ trợ.');
-        const data = await body(req);
+        const data = await authenticatedBody();
         const account = store.transaction(() => {
           const row = store.user(id); let profile = JSON.parse(row.profile), detail = '';
           if (operation === 'gold') {
@@ -107,10 +132,10 @@ export function createApi(store = new Store()) {
             profile.coins += data.amount; detail = `Điều chỉnh ${data.amount > 0 ? '+' : ''}${data.amount} vàng`;
           } else if (operation === 'cards') {
             check(integer(data.quantity, 1, 99) && (data.cardId === 'all' || cardExists(data.cardId)), 400, 'Thẻ hoặc số lượng không hợp lệ (1–99).');
-            const ids = data.cardId === 'all' ? CARDS.map(c => c.id) : [data.cardId];
+            const ids = data.cardId === 'all' ? config.cards.map(c => c.id) : [data.cardId];
             check(ids.every(key => (profile.collection[key] || 0) + data.quantity <= 999999), 400, 'Số lượng thẻ vượt giới hạn.');
             ids.forEach(key => { profile.collection[key] = (profile.collection[key] || 0) + data.quantity; });
-            detail = `Cấp ${data.quantity} bản sao ${data.cardId === 'all' ? 'mỗi thẻ trong 96 thẻ' : CARD_MAP[data.cardId].name}`;
+            detail = `Cấp ${data.quantity} bản sao ${data.cardId === 'all' ? 'mỗi thẻ trong danh mục' : catalog[data.cardId].name}`;
           } else if (operation === 'ban') {
             check(typeof data.banned === 'boolean', 400, 'Trạng thái khóa không hợp lệ.');
             check(id !== user.id, 400, 'Bạn không thể khóa tài khoản của chính mình.');
@@ -118,19 +143,27 @@ export function createApi(store = new Store()) {
             store.db.prepare('UPDATE users SET banned=? WHERE id=?').run(data.banned ? 1 : 0, id);
             if (data.banned) store.revokeSessions(id);
             detail = data.banned ? 'Khóa tài khoản và thu hồi phiên đăng nhập' : 'Mở khóa tài khoản';
-          } else if (operation === 'reset') { profile = freshState(); detail = 'Đặt lại tiến trình về bộ khởi đầu'; }
+          } else if (operation === 'reset') { profile = { ...freshState(), coins: config.settings.startingGold }; detail = 'Đặt lại tiến trình về bộ khởi đầu'; }
           else { profile.battle = null; detail = 'Hủy trận đang chơi, không trao thưởng'; }
           store.saveProfile(id, profile); store.audit(user.id, id, operation, detail); return store.account(store.user(id));
         });
         send(200, account); return;
       }
       check(route.startsWith('/api/game/') && method === 'POST', 404, 'Không tìm thấy chức năng.');
-      const data = await body(req), frames = [];
+      check(!config.settings.maintenance || user.role === 'admin', 503, 'Game đang bảo trì. Bạn có thể xem bộ sưu tập và quay lại sau.');
+      const data = await authenticatedBody(), frames = [];
       const account = store.transaction(() => {
+        const config = store.config(), catalog = Object.fromEntries(config.cards.map(c => [c.id,c]));
+        const cardExists = id => typeof id === 'string' && Object.hasOwn(catalog,id);
+        check(!config.settings.maintenance || store.user(user.id).role === 'admin',503,'Game đang bảo trì. Vui lòng quay lại sau.');
         const profile = JSON.parse(store.user(user.id).profile); let cards;
-        if (route === '/api/game/pack') cards = purchasePack(profile, data.packId);
+        if (route === '/api/game/pack') {
+          const pack=config.packs.find(p=>p.id===data.packId);
+          check(data.price===undefined || (pack && data.price===pack.price),409,'Giá pack đã thay đổi. Hãy xem giá mới rồi thử lại.');
+          cards = purchasePack(profile, data.packId, Math.random, config);
+        }
         else if (route === '/api/game/daily') {
-          check(profile.daily !== day(), 409, 'Bạn đã nhận quà hôm nay. Hẹn gặp lại ngày mai!'); profile.daily = day(); profile.coins += 300;
+          check(profile.daily !== day(), 409, 'Bạn đã nhận quà hôm nay. Hẹn gặp lại ngày mai!'); profile.daily = day(); profile.coins += config.settings.dailyGold;
         } else if (route === '/api/game/deck') {
           check(Array.isArray(data.deck) && data.deck.length <= 20 && data.deck.every(cardExists), 400, 'Bộ bài không hợp lệ.');
           const counts = {}; check(data.deck.every(id => { counts[id] = (counts[id] || 0) + 1; return counts[id] <= Math.min(2, profile.collection[id] || 0); }), 400, 'Chỉ được dùng thẻ đã sở hữu, tối đa 2 bản sao mỗi loại.');
@@ -138,8 +171,8 @@ export function createApi(store = new Store()) {
         } else if (route === '/api/game/preferences') {
           check(typeof data.sound === 'boolean', 400, 'Tùy chọn âm thanh không hợp lệ.'); profile.sound = data.sound;
         } else if (route === '/api/game/battle/start') {
-          check(validateDeck(profile.deck, profile.collection), 400, 'Bộ bài cần đúng 20 thẻ đã sở hữu.'); check(['ai', 'local'].includes(data.mode), 400, 'Chế độ không hợp lệ.');
-          profile.battle = createBattle(profile.deck, data.mode === 'ai' ? botDeck() : STARTER_DECK, data.mode); profile.battle.id = randomUUID(); profile.battle.revision = 0;
+          check(validateDeck(profile.deck, profile.collection, catalog), 400, 'Bộ bài cần đúng 20 thẻ đã sở hữu.'); check(['ai', 'local'].includes(data.mode), 400, 'Chế độ không hợp lệ.');
+          profile.battle = createBattle(profile.deck, data.mode === 'ai' ? botDeck() : STARTER_DECK, data.mode, Math.random, config.cards); profile.battle.id = randomUUID(); profile.battle.revision = 0; profile.battle.rewardRules = { ...config.settings };
         } else if (route === '/api/game/battle/action') {
           const b = profile.battle; check(b && b.winner === null, 409, 'Trận đấu không tồn tại hoặc đã kết thúc.'); check(data.battleId === b.id, 409, 'Trận đấu đã thay đổi. Vui lòng tải lại.');
           check(data.revision === b.revision, 409, 'Lượt đấu đã thay đổi trên thiết bị khác. Vui lòng thử lại.'); b.revision++;
@@ -152,7 +185,7 @@ export function createApi(store = new Store()) {
           else throw new ApiError(400, 'Hành động không hợp lệ.');
           frames.push(structuredClone(b));
           if (b.mode === 'ai') { let steps = 0; while (b.turn === 1 && b.winner === null) { check(++steps <= 50, 500, 'Không thể hoàn tất lượt máy.'); aiStep(b); frames.push(structuredClone(b)); } }
-          settle(profile);
+          settle(profile, config.settings);
         } else throw new ApiError(404, 'Không tìm thấy chức năng.');
         store.saveProfile(user.id, profile); return { ...store.account(store.user(user.id)), ...(cards ? { cards } : {}) };
       });

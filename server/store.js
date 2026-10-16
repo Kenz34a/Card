@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { freshState } from '../src/state.js';
+import { defaultConfig, validateConfig } from './config.js';
 
 export const dataPath = () => path.resolve(process.env.GAME_DATA_DIR || '.data', 'linh-thu.sqlite');
 export const hashToken = token => createHash('sha256').update(token).digest('hex');
@@ -34,7 +35,9 @@ export class Store {
         id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL,
         target TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, at INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);`);
+      CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+      CREATE TABLE IF NOT EXISTS game_config (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);`);
+    this.db.prepare('INSERT OR IGNORE INTO game_config(id,data) VALUES(1,?)').run(JSON.stringify(defaultConfig()));
   }
   close() { this.db.close(); }
   transaction(fn) {
@@ -44,15 +47,23 @@ export class Store {
   }
   user(id) { return this.db.prepare('SELECT * FROM users WHERE id=?').get(id); }
   byUsername(name) { return this.db.prepare('SELECT * FROM users WHERE username=?').get(name); }
-  createUser(username, displayName, password) {
+  createUser(username, displayName, password, settings = this.config().settings) {
     const id = randomUUID(), now = Date.now();
     this.db.prepare('INSERT INTO users(id,username,display_name,password_hash,profile,created_at,last_seen) VALUES(?,?,?,?,?,?,?)')
-      .run(id, username, displayName, hashPassword(password), JSON.stringify(freshState()), now, now);
+      .run(id, username, displayName, hashPassword(password), JSON.stringify({ ...freshState(), coins: settings.startingGold }), now, now);
     return this.user(id);
   }
   publicUser(row) { return { id: row.id, username: row.username, displayName: row.display_name, role: row.role, banned: !!row.banned, createdAt: row.created_at, lastSeen: row.last_seen }; }
   account(row) { return { user: this.publicUser(row), profile: JSON.parse(row.profile) }; }
   saveProfile(id, profile) { this.db.prepare('UPDATE users SET profile=? WHERE id=?').run(JSON.stringify(profile), id); }
+  config() { return JSON.parse(this.db.prepare('SELECT data FROM game_config WHERE id=1').get().data); }
+  saveConfig(input, expectedRevision) {
+    const current = this.config();
+    if (expectedRevision !== current.revision) { const error = new Error('Cấu hình đã được sửa ở nơi khác. Hãy tải lại trước khi lưu.'); error.status = 409; throw error; }
+    const value = validateConfig(input); value.revision = current.revision + 1;
+    if (!current.cards.every(old => value.cards.some(c => c.id === old.id && c.type === old.type)) || !current.packs.every(old => value.packs.some(p => p.id === old.id))) throw new Error('Không được xóa mã đã phát hành hoặc đổi loại thẻ; hãy ngừng phát hành.');
+    this.db.prepare('UPDATE game_config SET data=? WHERE id=1').run(JSON.stringify(value)); return value;
+  }
   newSession(id) {
     const token = randomBytes(32).toString('hex');
     this.db.prepare('DELETE FROM sessions WHERE expires_at<?').run(Date.now());

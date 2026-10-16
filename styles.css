@@ -3474,3 +3474,26 @@ p {
   .admin-user-stats > span { font-size: 8px; padding: 12px 5px; }
   .admin-user-stats strong { font-size: 12px; }
 }
+
+/* Full game administration. */
+.manager-tabs { display:flex; gap:7px; flex-wrap:wrap; margin:0 0 24px; padding:12px 0; border-bottom:1px solid var(--line); }
+.manager-tabs .filter-tab { font-size:12px; padding:10px 15px; }
+.manager-tools { display:flex; gap:8px; flex-wrap:wrap; margin:19px 0; }
+.manager-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; align-items:start; }
+.manager-form-grid > div[data-creature-fields] { display:grid; gap:16px; }
+.manager-form-grid [hidden], [data-creature-fields][hidden], [data-spell-fields][hidden], [data-bulk-gold][hidden], [data-bulk-cards][hidden] { display:none !important; }
+.admin-form textarea { width:100%; resize:vertical; border:1px solid #3b4938; border-radius:7px; background:#111b15; color:var(--text); padding:12px; font:inherit; font-size:12px; line-height:1.8; }
+.admin-form select[multiple] { padding:5px; }
+.admin-form select[multiple] option { padding:8px; margin:2px; border-radius:4px; }
+.manager-checks { display:flex; flex-wrap:wrap; gap:16px; }
+.admin-form .manager-toggle, .manager-checks label { display:flex; align-items:center; gap:9px; line-height:1.7; }
+.manager-toggle input, .manager-checks input { width:17px; height:17px; accent-color:var(--accent); }
+.manager-editor { width:min(100%,700px); }
+.manager-editor h3 { font-size:13px; font-weight:500; margin:7px 0 0; }
+.manager-table { min-width:650px; }
+.manager-table td small { display:block; margin-top:5px; font-size:9px; color:var(--muted); }
+.admin-table input[type=checkbox] { width:15px; height:15px; accent-color:var(--accent); cursor:pointer; }
+.game-notice { display:flex; align-items:center; gap:12px; padding:14px 18px; color:#dfd8a6; border:1px solid #9c954744; background:#c5ad4e0b; border-radius:9px; margin-bottom:23px; font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+.game-notice .icon { width:18px; height:18px; }
+@media(max-width:760px) { .manager-tabs { gap:4px; flex-wrap:nowrap; overflow:auto; } .manager-tabs .filter-tab { font-size:10px; padding:9px 12px; } .manager-tools .button { font-size:10px; padding:8px 10px; } .game-notice { font-size:10px; padding:12px; } }
+@media(max-width:470px) { .manager-form-grid { grid-template-columns:1fr; gap:14px; } .manager-tabs { margin-bottom:18px; } .manager-checks { gap:12px; } .manager-tools { gap:6px; } .manager-tools .button { font-size:9px; padding:8px; } }

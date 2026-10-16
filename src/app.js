@@ -1,8 +1,9 @@
-import { CARDS, CARD_MAP, ELEMENTS, RARITIES, PACKS, STARTER_DECK } from './cards.js';
+import { CARDS, CARD_MAP, ELEMENTS, RARITIES, PACKS, STARTER_DECK, applyCatalog } from './cards.js';
 import { createBattle, playCard, attack, evolve, endTurn, aiStep, botDeck } from './engine.js';
 import { freshState, loadState, purchasePack, validateDeck, STORAGE_KEY } from './state.js';
 import { icon, creatureArt, packArt } from './art.js';
 import { request, authContent, adminContent, adminUserContent } from './online.js';
+import { catalogEditor, newUserContent, bulkContent, passwordContent } from './management.js';
 
 let state;
 try { state = loadState(localStorage); } catch { state = freshState(); }
@@ -21,7 +22,9 @@ let currentUser = null;
 let remoteBusy = false;
 let authBusy = false;
 let displayedResult = null;
-const admin = { overview: null, users: [], total: 0, page: 1, search: '', loading: false, error: '', selected: null };
+const admin = { overview: null, users: [], total: 0, page: 1, search: '', loading: false, error: '', selected: null, tab: 'users', config: null, selectedIds: new Set(), catalogPage: 1, catalogSearch: '' };
+let gameSettings = { startingGold:1200, dailyGold:300, winGold:100, lossGold:40, localGold:60, registrationOpen:true, maintenance:false, announcement:'' };
+let catalogRevision = -1;
 const $ = (selector) => document.querySelector(selector);
 const format = n => Number(n).toLocaleString('vi-VN');
 const ownedCount = () => Object.keys(state.collection).filter(id => state.collection[id] > 0).length;
@@ -51,20 +54,20 @@ function button(label, action, extra = '', cls = '', glyph = '') {
   return `<button class="button ${cls}" data-action="${action}" ${extra}>${glyph ? icon(glyph) : ''}${label}</button>`;
 }
 function cardView(id, options = {}) {
-  const c = CARD_MAP[id], el = ELEMENTS[c.element], rarity = RARITIES[c.rarity];
+  const c = (options.battle ? state.battle?.cardMap?.[id] : null) || CARD_MAP[id], el = ELEMENTS[c.element], rarity = RARITIES[c.rarity];
   const count = state.collection[id] || 0;
   const tag = options.static ? 'div' : 'button';
   const unit = options.unit;
   const action = options.action || 'detail';
-  const label = `${c.name}, ${rarity.name}, ${c.cost} năng lượng. ${c.description}`;
+  const label = escape(`${c.name}, ${rarity.name}, ${c.cost} năng lượng. ${c.description}`);
   return `<${tag} class="game-card ${options.unowned ? 'unowned' : ''}" style="--rarity:${rarity.color};--element:${el.color}" ${options.static ? '' : `data-action="${action}" data-id="${id}" ${options.attrs || ''} aria-label="${label}"`} title="${label}">
     <div class="art-frame">${creatureArt(c, '', true)}<span class="card-cost">${c.cost}</span><span class="card-element">${icon(el.icon)}</span></div>
     <div class="card-rarity"><span class="rarity-dot"></span>${unit?.evolved ? 'TIẾN HÓA ✦' : rarity.name.toLocaleUpperCase('vi')}</div>
-    <strong class="card-name">${c.name}</strong>
+    <strong class="card-name">${escape(c.name)}</strong>
     <div class="card-stats">${c.type === 'creature' ? `<span class="attack">${icon('sword')}${unit?.attack ?? c.attack}</span><span class="health">${icon('heart')}${unit?.hp ?? c.health}</span>` : `<span style="font-size:8px;color:${el.color}">${icon('spark')} PHÉP THUẬT</span>`}${options.hideCount ? '' : `<small class="card-count">${count ? `×${count}` : 'CHƯA CÓ'}</small>`}</div>
   </${tag}>`;
 }
-function heroCard(id) { return `<div class="hero-card">${creatureArt(CARD_MAP[id], '', true)}<div class="hero-card-title">${CARD_MAP[id].name}</div><div class="hero-card-rarity">✦ HUYỀN THOẠI ✦</div></div>`; }
+function heroCard(id) { return `<div class="hero-card">${creatureArt(CARD_MAP[id], '', true)}<div class="hero-card-title">${escape(CARD_MAP[id].name)}</div><div class="hero-card-rarity">✦ HUYỀN THOẠI ✦</div></div>`; }
 function render() {
   const names = { home: 'Khám phá', packs: 'Mở túi thẻ', collection: 'Bộ sưu tập', deck: 'Bộ bài của bạn', battle: 'Đấu trường', admin: 'Quản trị' };
   const nav = [['home', 'grid', 'Khám phá'], ['packs', 'pack', 'Mở túi thẻ'], ['collection', 'cards', 'Bộ sưu tập'], ['deck', 'shield', 'Bộ bài của bạn'], ['battle', 'sword', 'Đấu trường']];
@@ -73,22 +76,24 @@ function render() {
     <button class="brand" data-action="nav" data-page="home" aria-label="Linh Thú — trang chủ"><span class="brand-symbol">${icon('bolt')}</span><span><span class="brand-name">LINH THÚ</span><span class="brand-sub">TRADING CARD GAME</span></span></button>
     <div class="nav-label">THẾ GIỚI CỦA BẠN</div><nav class="nav" aria-label="Điều hướng chính">${nav.map(([key, glyph, label]) => `<button class="nav-item ${page === key ? 'active' : ''}" data-action="nav" data-page="${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span>${key === 'packs' ? '<small>MỚI</small>' : ''}</button>`).join('')}</nav>
     <div class="sidebar-bottom"><div class="season-card"><div>${icon('trophy')} HÀNH TRÌNH KHỞI NGUYÊN</div><p>Mỗi lá bài là một câu chuyện.<br>Huyền thoại của bạn bắt đầu từ đây.</p><button data-action="daily">Quà mỗi ngày ${icon(state.daily === today() ? 'check' : 'gift')}</button></div><div class="utility"><button data-action="help">${icon('help')} Cách chơi</button><button data-action="sound" aria-label="${state.sound ? 'Tắt' : 'Bật'} âm thanh" title="${state.sound ? 'Tắt' : 'Bật'} âm thanh">${icon(state.sound ? 'volume' : 'mute')}</button></div></div>
-  </aside><main class="main"><header class="topbar"><div class="breadcrumb"><button class="mobile-menu" data-action="menu" aria-label="Mở điều hướng">${icon('menu')}</button><span>Không gian triệu hồi</span>${icon('chevron')}<strong>${names[page]}</strong></div><div class="account"><button class="balance" data-action="daily" title="Nhận quà vàng mỗi ngày" style="background:none;padding:0">${icon('coin', 'coin-icon')} ${format(state.coins)} <small>VÀNG</small></button><div class="divider"></div>${currentUser ? `<button class="profile profile-button" data-action="account" aria-label="Tài khoản ${escape(currentUser.username)}"><span class="avatar">${icon(currentUser.role === 'admin' ? 'shield' : 'user')}</span><span><strong>${escape(currentUser.displayName)}</strong><small>${currentUser.role === 'admin' ? 'QUẢN TRỊ VIÊN' : `${state.wins} chiến thắng · Cấp ${Math.floor(state.wins / 3) + 1}`}</small></span></button>` : button('Đăng nhập', 'auth', '', 'small secondary', 'user')}</div></header><div class="content">${page === 'home' ? homePage() : page === 'packs' ? packsPage() : page === 'collection' ? collectionPage() : page === 'deck' ? deckPage() : page === 'admin' ? adminPage() : battlePage()}<footer class="footer"><span>© 2026 LINH THÚ · Một thế giới, vô vàn huyền thoại.</span><span>${icon('shield')} ${currentUser ? 'Tiến trình lưu trên máy chủ' : 'Đang chơi khách · Lưu trên thiết bị'}</span></footer></div></main></div>`;
+  </aside><main class="main"><header class="topbar"><div class="breadcrumb"><button class="mobile-menu" data-action="menu" aria-label="Mở điều hướng">${icon('menu')}</button><span>Không gian triệu hồi</span>${icon('chevron')}<strong>${names[page]}</strong></div><div class="account"><button class="balance" data-action="daily" title="Nhận quà vàng mỗi ngày" style="background:none;padding:0">${icon('coin', 'coin-icon')} ${format(state.coins)} <small>VÀNG</small></button><div class="divider"></div>${currentUser ? `<button class="profile profile-button" data-action="account" aria-label="Tài khoản ${escape(currentUser.username)}"><span class="avatar">${icon(currentUser.role === 'admin' ? 'shield' : 'user')}</span><span><strong>${escape(currentUser.displayName)}</strong><small>${currentUser.role === 'admin' ? 'QUẢN TRỊ VIÊN' : `${state.wins} chiến thắng · Cấp ${Math.floor(state.wins / 3) + 1}`}</small></span></button>` : button('Đăng nhập', 'auth', '', 'small secondary', 'user')}</div></header><div class="content">${gameSettings.announcement || gameSettings.maintenance ? `<div class="game-notice" role="status">${icon(gameSettings.maintenance ? 'shield' : 'spark')}<span>${gameSettings.maintenance ? 'Game đang bảo trì. ' : ''}${escape(gameSettings.announcement)}</span></div>` : ''}${page === 'home' ? homePage() : page === 'packs' ? packsPage() : page === 'collection' ? collectionPage() : page === 'deck' ? deckPage() : page === 'admin' ? adminPage() : battlePage()}<footer class="footer"><span>© 2026 LINH THÚ · Một thế giới, vô vàn huyền thoại.</span><span>${icon('shield')} ${currentUser ? 'Tiến trình lưu trên máy chủ' : 'Đang chơi khách · Lưu trên thiết bị'}</span></footer></div></main></div>`;
   if (!currentUser && page === 'battle' && state.battle?.winner !== null && state.battle && !state.battle.rewarded) finishBattle();
 }
 function heading(eyebrow, title, subtitle, action = '') { return `<div class="page-heading"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`; }
 function packTiles() {
-  return `<div class="packs-grid">${PACKS.map((p, i) => `<article class="pack-tile"><div class="pack-scene" style="--pack-glow:${ELEMENTS[p.element].color}25"><span class="pack-edition">${i === 0 ? 'BỘ THẺ KHỞI ĐẦU' : i === 3 ? 'PHIÊN BẢN ĐẶC BIỆT' : 'BỘ THẺ NGUYÊN TỐ'}</span><span class="pack-count">01 / 2026</span>${packArt(p)}</div><div class="pack-info"><div class="eyebrow">${p.tag}</div><h3>${p.name}</h3><p>${p.subtitle}</p><div class="pack-buy"><span class="price">${icon('coin')}${p.price}</span>${button('Mở pack', 'buy-pack', `data-pack="${p.id}"`, '', 'plus')}</div></div></article>`).join('')}</div>`;
+  if (!PACKS.some(p=>p.enabled!==false)) return '<div class="empty-state"><h3>Pack đang tạm ngừng phát hành</h3><p>Hãy quay lại sau hoặc tiếp tục chơi đấu trường.</p></div>';
+  return `<div class="packs-grid">${PACKS.filter(p => p.enabled !== false).map((p, i) => `<article class="pack-tile"><div class="pack-scene" style="--pack-glow:${ELEMENTS[p.element].color}25"><span class="pack-edition">${i === 0 ? 'BỘ THẺ KHỞI ĐẦU' : i === 3 ? 'PHIÊN BẢN ĐẶC BIỆT' : 'BỘ THẺ NGUYÊN TỐ'}</span><span class="pack-count">01 / 2026</span>${packArt(p)}</div><div class="pack-info"><div class="eyebrow">${escape(p.tag)}</div><h3>${escape(p.name)}</h3><p>${escape(p.subtitle)}</p><div class="pack-buy"><span class="price">${icon('coin')}${p.price}</span>${button('Mở pack', 'buy-pack', `data-pack="${p.id}"`, '', 'plus')}</div></div></article>`).join('')}</div>`;
 }
 function homePage() {
+  const firstPack = PACKS.find(p => p.enabled !== false);
   return `${heading('CHÀO MỪNG ĐẾN VỚI LINH THÚ', 'Hành trình của bạn bắt đầu.', 'Sưu tầm linh thú. Kiến tạo bộ bài. Viết nên huyền thoại.', button('Vào đấu trường', 'nav', 'data-page="battle"', 'secondary', 'sword'))}
-  <div class="hero-row"><section class="hero"><div class="hero-copy"><span class="hero-badge"><span></span> SERIES 01 · KỶ NGUYÊN KHỞI NGUYÊN</span><h2>KHAI MỞ<br><em>HUYỀN THOẠI.</em></h2><p>Ẩn sau mỗi lá bài là một sức mạnh chờ được đánh thức. Linh thú nào sẽ chọn bạn?</p>${button('Mở pack đầu tiên', 'buy-pack', 'data-pack="origin"', '', 'spark')}</div><div class="hero-gallery">${heroCard('shadow-12')}${heroCard('light-12')}${heroCard('nature-12')}</div><span class="hero-spark">${icon('spark')}</span></section>
-    <aside class="daily-card"><div class="eyebrow">MỘT MÓN QUÀ NHỎ, MỖI NGÀY</div><div class="gift-visual">${icon('gift')}</div><h3>May mắn đang chờ!</h3><p>Nhận 300 vàng miễn phí<br>để tiếp tục hành trình của bạn.</p>${button(state.daily === today() ? 'Đã nhận hôm nay' : 'Nhận quà hôm nay', 'daily', state.daily === today() ? 'disabled' : '', '', state.daily === today() ? 'check' : 'gift')}<small>Không cần nạp tiền. Chỉ cần đam mê.</small></aside></div>
-  <div class="stats-strip"><div class="stat"><span class="stat-symbol">${icon('cards')}</span><span><strong>96 thẻ độc đáo</strong><small>Khám phá bộ sưu tập đầu tiên</small></span></div><div class="stat"><span class="stat-symbol">${icon('spark')}</span><span><strong>6 hệ nguyên tố</strong><small>Vô vàn cách kết hợp sức mạnh</small></span></div><div class="stat"><span class="stat-symbol">${icon('sword')}</span><span><strong>Chiến thuật của bạn</strong><small>Mỗi lượt đi, một bước ngoặt</small></span></div></div>
-  <section><div class="section-heading"><div><h2>Chọn hành trình của bạn</h2><p>Mỗi pack gồm 5 thẻ. Luôn có ít nhất 1 thẻ Hiếm trở lên.</p></div><button class="text-button" data-action="odds">Tỉ lệ xuất hiện ${icon('arrow')}</button></div>${packTiles()}</section>
+  <div class="hero-row"><section class="hero"><div class="hero-copy"><span class="hero-badge"><span></span> SERIES 01 · KỶ NGUYÊN KHỞI NGUYÊN</span><h2>KHAI MỞ<br><em>HUYỀN THOẠI.</em></h2><p>Ẩn sau mỗi lá bài là một sức mạnh chờ được đánh thức. Linh thú nào sẽ chọn bạn?</p>${button('Mở pack đầu tiên', 'buy-pack', `data-pack="${firstPack?.id || ''}" ${firstPack ? '' : 'disabled'}`, '', 'spark')}</div><div class="hero-gallery">${heroCard('shadow-12')}${heroCard('light-12')}${heroCard('nature-12')}</div><span class="hero-spark">${icon('spark')}</span></section>
+    <aside class="daily-card"><div class="eyebrow">MỘT MÓN QUÀ NHỎ, MỖI NGÀY</div><div class="gift-visual">${icon('gift')}</div><h3>May mắn đang chờ!</h3><p>Nhận ${gameSettings.dailyGold} vàng miễn phí<br>để tiếp tục hành trình của bạn.</p>${button(state.daily === today() ? 'Đã nhận hôm nay' : 'Nhận quà hôm nay', 'daily', state.daily === today() ? 'disabled' : '', '', state.daily === today() ? 'check' : 'gift')}<small>Không cần nạp tiền. Chỉ cần đam mê.</small></aside></div>
+  <div class="stats-strip"><div class="stat"><span class="stat-symbol">${icon('cards')}</span><span><strong>${CARDS.length} thẻ độc đáo</strong><small>Khám phá bộ sưu tập đầu tiên</small></span></div><div class="stat"><span class="stat-symbol">${icon('spark')}</span><span><strong>6 hệ nguyên tố</strong><small>Vô vàn cách kết hợp sức mạnh</small></span></div><div class="stat"><span class="stat-symbol">${icon('sword')}</span><span><strong>Chiến thuật của bạn</strong><small>Mỗi lượt đi, một bước ngoặt</small></span></div></div>
+  <section><div class="section-heading"><div><h2>Chọn hành trình của bạn</h2><p>Mỗi pack gồm 5 thẻ. Tỉ lệ và thẻ bảo đảm theo từng pack.</p></div><button class="text-button" data-action="odds">Tỉ lệ xuất hiện ${icon('arrow')}</button></div>${packTiles()}</section>
   <section class="bottom-banner"><div class="banner-icon">${icon('sword')}</div><div><h3>Bộ bài đã sẵn sàng. Đấu một trận chứ?</h3><p>Bạn có sẵn 20 thẻ khởi đầu. Chiến thắng để nhận thêm vàng!</p></div>${button('Thử sức ngay', 'start-menu', '', 'secondary', 'arrow')}</section>`;
 }
-function packsPage() { return `${heading('SỨC MẠNH NẰM TRONG TAY BẠN', 'Một pack. Vô vàn khả năng.', 'Mở 5 thẻ ngẫu nhiên, săn tìm linh thú Huyền thoại.', button('Tỉ lệ xuất hiện', 'odds', '', 'secondary', 'help'))}${packTiles()}<div class="stats-strip"><div class="stat"><span class="stat-symbol">${icon('pack')}</span><span><strong>${state.packsOpened} pack đã mở</strong><small>Mỗi lần mở là một bất ngờ</small></span></div><div class="stat"><span class="stat-symbol">${icon('cards')}</span><span><strong>${ownedCount()} / 96 thẻ</strong><small>Bộ sưu tập đang lớn dần</small></span></div><div class="stat"><span class="stat-symbol">${icon('shield')}</span><span><strong>Bảo đảm thẻ Hiếm</strong><small>Thẻ trùng được giữ để xây bộ bài</small></span></div></div><div class="bottom-banner"><span class="banner-icon">${icon('gift')}</span><div><h3>Thêm vàng, thêm cơ hội</h3><p>Quà mỗi ngày +300 vàng. Thắng trận +100, thua trận +40.</p></div>${button('Nhận quà', 'daily', '', 'secondary', 'gift')}</div>`; }
+function packsPage() { return `${heading('SỨC MẠNH NẰM TRONG TAY BẠN', 'Một pack. Vô vàn khả năng.', 'Mở 5 thẻ ngẫu nhiên, săn tìm linh thú Huyền thoại.', button('Tỉ lệ xuất hiện', 'odds', '', 'secondary', 'help'))}${packTiles()}<div class="stats-strip"><div class="stat"><span class="stat-symbol">${icon('pack')}</span><span><strong>${state.packsOpened} pack đã mở</strong><small>Mỗi lần mở là một bất ngờ</small></span></div><div class="stat"><span class="stat-symbol">${icon('cards')}</span><span><strong>${ownedCount()} / ${CARDS.length} thẻ</strong><small>Bộ sưu tập đang lớn dần</small></span></div><div class="stat"><span class="stat-symbol">${icon('shield')}</span><span><strong>Thẻ bảo đảm theo pack</strong><small>Thẻ trùng được giữ để xây bộ bài</small></span></div></div><div class="bottom-banner"><span class="banner-icon">${icon('gift')}</span><div><h3>Thêm vàng, thêm cơ hội</h3><p>Quà mỗi ngày +${gameSettings.dailyGold} vàng. Thắng trận +${gameSettings.winGold}, thua trận +${gameSettings.lossGold}.</p></div>${button('Nhận quà', 'daily', '', 'secondary', 'gift')}</div>`; }
 function filterBar(deck = false) { return `<div class="filters"><div class="search-field">${icon('search')}<input id="card-search" type="search" placeholder="Tìm linh thú, phép thuật..." aria-label="Tìm thẻ bài" value="${escape(filters.search)}" autocomplete="off" /></div><select id="rarity-filter" aria-label="Độ hiếm"><option value="all">Mọi độ hiếm</option>${Object.entries(RARITIES).map(([key, r]) => `<option value="${key}" ${filters.rarity === key ? 'selected' : ''}>${r.name}</option>`).join('')}</select>${!deck ? `<select id="owned-filter" aria-label="Quyền sở hữu"><option value="all">Tất cả thẻ</option><option value="owned" ${filters.owned === 'owned' ? 'selected' : ''}>Đã sở hữu</option><option value="missing" ${filters.owned === 'missing' ? 'selected' : ''}>Chưa sở hữu</option></select>` : ''}</div><div class="filter-tabs" role="group" aria-label="Hệ nguyên tố"><button class="filter-tab ${filters.element === 'all' ? 'active' : ''}" data-action="filter-element" data-element="all">Tất cả</button>${Object.entries(ELEMENTS).map(([key, el]) => `<button class="filter-tab ${filters.element === key ? 'active' : ''}" data-action="filter-element" data-element="${key}">${icon(el.icon)}${el.name}</button>`).join('')}</div>`; }
 function filteredCards(deck = false) {
   const query = filters.search.toLocaleLowerCase('vi').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replaceAll('đ', 'd');
@@ -101,11 +106,11 @@ function collectionGrid(deck = false) {
   const cards = filteredCards(deck);
   return cards.length ? cards.map(c => cardView(c.id, { unowned: !state.collection[c.id], action: deck ? 'add-deck' : 'detail' })).join('') : `<div class="empty-state">${icon('search')}<h3>Chưa tìm thấy thẻ bài</h3><p>Thử đổi từ khóa hoặc bộ lọc nhé.</p></div>`;
 }
-function collectionPage() { return `${heading('NHỮNG ĐỒNG ĐỘI CỦA BẠN', 'Bộ sưu tập linh thú', 'Mỗi lá bài, một sức mạnh riêng. Bấm vào thẻ để khám phá.', button('Mở thêm thẻ', 'nav', 'data-page="packs"', '', 'pack'))}${filterBar()}<div class="collection-summary"><span>${ownedCount()} / 96 thẻ đã khám phá</span><div class="progress-track"><span style="width:${ownedCount() / 96 * 100}%"></span></div><span id="filter-count">${filteredCards().length} kết quả</span></div><div class="collection-grid" id="collection-grid">${collectionGrid()}</div>`; }
+function collectionPage() { return `${heading('NHỮNG ĐỒNG ĐỘI CỦA BẠN', 'Bộ sưu tập linh thú', 'Mỗi lá bài, một sức mạnh riêng. Bấm vào thẻ để khám phá.', button('Mở thêm thẻ', 'nav', 'data-page="packs"', '', 'pack'))}${filterBar()}<div class="collection-summary"><span>${ownedCount()} / ${CARDS.length} thẻ đã khám phá</span><div class="progress-track"><span style="width:${ownedCount() / CARDS.length * 100}%"></span></div><span id="filter-count">${filteredCards().length} kết quả</span></div><div class="collection-grid" id="collection-grid">${collectionGrid()}</div>`; }
 function deckPanel() {
   const counts = {}; state.deck.forEach(id => { counts[id] = (counts[id] || 0) + 1; });
   const entries = Object.entries(counts).sort((a, b) => CARD_MAP[a[0]].cost - CARD_MAP[b[0]].cost);
-  return `<aside class="deck-panel"><h3>Bộ bài chiến đấu <span>${state.deck.length}/20</span></h3><p>Tối đa 2 bản sao mỗi thẻ. Bấm thẻ bên trái để thêm.</p><div class="deck-curve"><div class="mana-curve" aria-label="Phân bố năng lượng">${Array.from({ length: 7 }, (_, i) => { const n = state.deck.filter(id => CARD_MAP[id].cost === i + 1).length; return `<div class="mana-column" data-cost="${i + 1}" style="height:${Math.max(3, n * 5)}px" title="${i + 1} năng lượng: ${n} thẻ"></div>`; }).join('')}</div></div><div class="deck-list">${entries.map(([id, n]) => `<div class="deck-row" style="--element:${ELEMENTS[CARD_MAP[id].element].color}"><strong>${CARD_MAP[id].cost}</strong><span>${CARD_MAP[id].name}</span><small>×${n}</small><button data-action="remove-deck" data-id="${id}" aria-label="Bỏ một ${CARD_MAP[id].name}">${icon('minus')}</button></div>`).join('') || '<p>Bộ bài đang trống. Chọn linh thú bên trái!</p>'}</div>${state.deck.length !== 20 ? `<p class="deck-full">Cần thêm ${20 - state.deck.length} thẻ để vào đấu trường.</p>` : ''}${button('Sẵn sàng chiến đấu', 'start-menu', validateDeck(state.deck, state.collection) ? '' : 'disabled', '', 'sword')}<button class="text-button" style="margin:13px auto 0" data-action="reset-deck">${icon('refresh')} Khôi phục bộ bài khởi đầu</button></aside>`;
+  return `<aside class="deck-panel"><h3>Bộ bài chiến đấu <span>${state.deck.length}/20</span></h3><p>Tối đa 2 bản sao mỗi thẻ. Bấm thẻ bên trái để thêm.</p><div class="deck-curve"><div class="mana-curve" aria-label="Phân bố năng lượng">${Array.from({ length: 7 }, (_, i) => { const n = state.deck.filter(id => CARD_MAP[id].cost === i + 1).length; return `<div class="mana-column" data-cost="${i + 1}" style="height:${Math.max(3, n * 5)}px" title="${i + 1} năng lượng: ${n} thẻ"></div>`; }).join('')}</div></div><div class="deck-list">${entries.map(([id, n]) => `<div class="deck-row" style="--element:${ELEMENTS[CARD_MAP[id].element].color}"><strong>${CARD_MAP[id].cost}</strong><span>${escape(CARD_MAP[id].name)}</span><small>×${n}</small><button data-action="remove-deck" data-id="${id}" aria-label="Bỏ một ${escape(CARD_MAP[id].name)}">${icon('minus')}</button></div>`).join('') || '<p>Bộ bài đang trống. Chọn linh thú bên trái!</p>'}</div>${state.deck.length !== 20 ? `<p class="deck-full">Cần thêm ${20 - state.deck.length} thẻ để vào đấu trường.</p>` : ''}${button('Sẵn sàng chiến đấu', 'start-menu', validateDeck(state.deck, state.collection) ? '' : 'disabled', '', 'sword')}<button class="text-button" style="margin:13px auto 0" data-action="reset-deck">${icon('refresh')} Khôi phục bộ bài khởi đầu</button></aside>`;
 }
 function deckPage() { return `${heading('CHIẾN THUẬT BẮT ĐẦU TỪ ĐÂY', 'Bộ bài của bạn', 'Kết hợp linh thú và phép thuật để tạo nên lối chơi riêng.')}<div class="deck-layout"><section>${filterBar(true)}<div class="collection-summary">${icon('plus')} Bấm vào một thẻ để thêm vào bộ bài.</div><div class="collection-grid" id="collection-grid">${collectionGrid(true)}</div></section>${deckPanel()}</div>`; }
 function battlePage() {
@@ -121,9 +126,9 @@ function battlePage() {
   <div class="battle-layout"><section class="arena ${handoff ? 'turn-shield' : ''}" aria-label="Sân đấu">${heroBar(enemy, enemyName, true, !!selected && enemy.board.length === 0 && myTurn)}
     <div class="opponent-hand" aria-label="Đối thủ có ${enemy.hand.length} thẻ">${enemy.hand.map((_, i) => `<span class="mini-back" style="--angle:${(i - enemy.hand.length / 2) * 3}deg">✦</span>`).join('')}</div>
     ${boardRow(enemy.board, false, myTurn && !!selected)}<div class="arena-divider">${icon('spark')} LINH THÚ ARENA ${icon('spark')}</div>${boardRow(own.board, true, false, myTurn)}
-    ${selected && myTurn ? `<div class="selection-bar"><span>${CARD_MAP[selected.cardId].name}${selected.ready ? ' · Chọn mục tiêu để tấn công' : ' · Đã hành động / đang chờ lượt'}</span>${button('Tiến hóa · 2', 'evolve', `data-uid="${selected.uid}" ${selected.evolved || own.energy < 2 ? 'disabled' : ''}`, 'secondary', 'spark')}${button('Bỏ chọn', 'deselect', '', 'secondary')}</div>` : ''}
+    ${selected && myTurn ? `<div class="selection-bar"><span>${escape((b.cardMap?.[selected.cardId] || CARD_MAP[selected.cardId]).name)}${selected.ready ? ' · Chọn mục tiêu để tấn công' : ' · Đã hành động / đang chờ lượt'}</span>${button('Tiến hóa · 2', 'evolve', `data-uid="${selected.uid}" ${selected.evolved || own.energy < 2 ? 'disabled' : ''}`, 'secondary', 'spark')}${button('Bỏ chọn', 'deselect', '', 'secondary')}</div>` : ''}
     ${heroBar(own, ownName, false)}<div class="turn-label"><span>${activeText}</span>${button(b.winner !== null ? 'Trận mới' : 'Kết thúc lượt', b.winner !== null ? 'start-menu' : 'end-turn', !myTurn && b.winner === null ? 'disabled' : '', '', b.winner !== null ? 'refresh' : 'arrow')}</div>
-    <div class="hand" aria-label="Bài trên tay">${own.hand.map((id, i) => { const c = CARD_MAP[id]; const playable = myTurn && own.energy >= c.cost && (c.type === 'spell' || own.board.length < 4); return `<div class="hand-card ${playable ? 'playable' : 'unplayable'}">${cardView(id, { action: 'play-card', attrs: `data-index="${i}"`, hideCount: true })}<div class="hand-caption">${c.type === 'spell' ? 'DÙNG PHÉP' : 'TRIỆU HỒI'} · ${c.cost} NĂNG LƯỢNG</div></div>`; }).join('') || '<p style="font-size:11px;color:var(--muted)">Tay bài trống. Kết thúc lượt để rút thêm thẻ.</p>'}</div></section>
+    <div class="hand" aria-label="Bài trên tay">${own.hand.map((id, i) => { const c = b.cardMap?.[id] || CARD_MAP[id]; const playable = myTurn && own.energy >= c.cost && (c.type === 'spell' || own.board.length < 4); return `<div class="hand-card ${playable ? 'playable' : 'unplayable'}">${cardView(id, { action: 'play-card', attrs: `data-index="${i}"`, hideCount: true, battle: true })}<div class="hand-caption">${c.type === 'spell' ? 'DÙNG PHÉP' : 'TRIỆU HỒI'} · ${c.cost} NĂNG LƯỢNG</div></div>`; }).join('') || '<p style="font-size:11px;color:var(--muted)">Tay bài trống. Kết thúc lượt để rút thêm thẻ.</p>'}</div></section>
     <aside class="battle-side"><div class="battle-meta"><div class="eyebrow">${icon('shield')} TỔNG QUAN TRẬN ĐẤU</div><h3>${own.deck.length} thẻ trong bộ bài</h3><p>Đối thủ còn ${enemy.deck.length} thẻ.<br>Tiến hóa: 2 năng lượng / linh thú.<br>Tối đa 4 linh thú trên sân.</p></div><div class="battle-meta battle-log" aria-live="polite"><h3>${icon('cards')} Nhật ký chiến đấu</h3>${b.log.slice(0, 12).map(line => `<div class="log-entry">${escape(line)}</div>`).join('')}</div><div class="battle-help">${icon('help')} Thú mới triệu hồi cần chờ một lượt. Hệ Lôi có thể tấn công ngay. Đánh bại thú phòng thủ trước khi tấn công đối thủ.</div></aside></div>`;
 }
 function heroBar(p, name, enemy, target = false) {
@@ -133,7 +138,7 @@ function boardRow(units, own, targetable, myTurn = false) {
   return `<div class="board-row ${own ? 'own-board' : 'enemy-board'}">${Array.from({ length: 4 }, (_, i) => {
     const u = units[i];
     if (!u) return `<div class="slot" aria-label="Ô triệu hồi trống">${icon('spark')}</div>`;
-    return `<div class="unit ${u.ready && own && myTurn ? 'ready' : ''} ${u.uid === selectedUnit && own ? 'selected' : ''} ${targetable ? 'targetable' : ''}" data-unit="${u.uid}">${cardView(u.cardId, { unit: u, action: own ? 'select-unit' : 'attack-unit', attrs: `data-uid="${u.uid}"`, hideCount: true })}<span class="unit-status">${u.shield ? icon('shield') : ''}${u.frozen ? '❄' : ''}${u.evolved ? '✦' : ''}${!u.ready && own ? 'ZZ' : ''}</span></div>`;
+    return `<div class="unit ${u.ready && own && myTurn ? 'ready' : ''} ${u.uid === selectedUnit && own ? 'selected' : ''} ${targetable ? 'targetable' : ''}" data-unit="${u.uid}">${cardView(u.cardId, { unit: u, action: own ? 'select-unit' : 'attack-unit', attrs: `data-uid="${u.uid}"`, hideCount: true, battle: true })}<span class="unit-status">${u.shield ? icon('shield') : ''}${u.frozen ? '❄' : ''}${u.evolved ? '✦' : ''}${!u.ready && own ? 'ZZ' : ''}</span></div>`;
   }).join('')}</div>`;
 }
 function showModal(content, cls = '') {
@@ -148,27 +153,32 @@ function closeModal() {
   if (lastFocus?.isConnected) lastFocus.focus();
 }
 function helpModal() {
-  showModal(`<div class="eyebrow">CẨM NANG TRIỆU HỒI SƯ</div><h2>Mỗi lá bài, một nước đi.</h2><p>Đưa sinh lực đối thủ từ 24 về 0 để giành chiến thắng.</p><ol class="rules"><li><strong>Xây bộ bài:</strong> chọn đúng 20 thẻ đã sở hữu, tối đa 2 bản sao mỗi loại. Bạn đã có sẵn bộ khởi đầu.</li><li><strong>Triệu hồi & dùng phép:</strong> bấm thẻ trên tay để dùng. Tiêu hao năng lượng bằng con số trên thẻ. Mỗi lượt được hồi đầy và tăng 1 năng lượng, tối đa 10.</li><li><strong>Tấn công:</strong> chọn thú của bạn, rồi chọn thú địch. Hai thú gây sát thương đồng thời. Khi sân địch trống, bấm thanh sinh lực đối thủ.</li><li><strong>Tiến hóa:</strong> chọn thú rồi bấm Tiến hóa. Tốn 2 năng lượng, nhận +2 công và +3 sinh lực; mỗi thú một lần.</li><li><strong>Kỹ năng hệ:</strong> Hỏa gây sát thương khi gọi · Thủy hồi máu · Mộc hồi thú · Lôi tốc kích · Quang có khiên · Ám hút máu.</li><li><strong>Giới hạn:</strong> 4 thú trên sân, 9 thẻ trên tay. Cạn bộ bài sẽ mất sinh lực tăng dần mỗi lượt. Thú mới cần đợi lượt tiếp theo (trừ Lôi).</li><li><strong>Phần thưởng:</strong> thắng +100 vàng, thua +40, hai người +60. Mở pack để mở rộng bộ sưu tập. ${currentUser ? 'Tiến trình lưu trên máy chủ.' : 'Tiến trình khách lưu trên trình duyệt này.'}</li></ol>${button('Đã hiểu, vào game!', 'close-modal', '', '', 'check')}`);
+  showModal(`<div class="eyebrow">CẨM NANG TRIỆU HỒI SƯ</div><h2>Mỗi lá bài, một nước đi.</h2><p>Đưa sinh lực đối thủ từ 24 về 0 để giành chiến thắng.</p><ol class="rules"><li><strong>Xây bộ bài:</strong> chọn đúng 20 thẻ đã sở hữu, tối đa 2 bản sao mỗi loại. Bạn đã có sẵn bộ khởi đầu.</li><li><strong>Triệu hồi & dùng phép:</strong> bấm thẻ trên tay để dùng. Tiêu hao năng lượng bằng con số trên thẻ. Mỗi lượt được hồi đầy và tăng 1 năng lượng, tối đa 10.</li><li><strong>Tấn công:</strong> chọn thú của bạn, rồi chọn thú địch. Hai thú gây sát thương đồng thời. Khi sân địch trống, bấm thanh sinh lực đối thủ.</li><li><strong>Tiến hóa:</strong> chọn thú rồi bấm Tiến hóa. Tốn 2 năng lượng, nhận +2 công và +3 sinh lực; mỗi thú một lần.</li><li><strong>Kỹ năng hệ:</strong> Hỏa gây sát thương khi gọi · Thủy hồi máu · Mộc hồi thú · Lôi tốc kích · Quang có khiên · Ám hút máu.</li><li><strong>Giới hạn:</strong> 4 thú trên sân, 9 thẻ trên tay. Cạn bộ bài sẽ mất sinh lực tăng dần mỗi lượt. Thú mới cần đợi lượt tiếp theo (trừ Lôi).</li><li><strong>Phần thưởng:</strong> thắng +${gameSettings.winGold} vàng, thua +${gameSettings.lossGold}, hai người +${gameSettings.localGold}. Mở pack để mở rộng bộ sưu tập. ${currentUser ? 'Tiến trình lưu trên máy chủ.' : 'Tiến trình khách lưu trên trình duyệt này.'}</li></ol>${button('Đã hiểu, vào game!', 'close-modal', '', '', 'check')}`);
 }
 function detailModal(id) {
-  const c = CARD_MAP[id];
-  showModal(`<div class="card-detail">${cardView(id, { static: true })}<div><div class="eyebrow" style="color:${RARITIES[c.rarity].color}">${RARITIES[c.rarity].name} · HỆ ${ELEMENTS[c.element].name}</div><h2>${c.name}</h2><p>${c.type === 'creature' ? 'LINH THÚ' : 'PHÉP THUẬT'} · ${c.cost} năng lượng</p><div class="description">${c.description}</div><p>Đã sở hữu: ${state.collection[id] || 0}<br>Trong bộ bài: ${state.deck.filter(x => x === id).length} / 2</p>${state.collection[id] ? button('Thêm vào bộ bài', 'add-deck', `data-id="${id}"`, '', 'plus') : button('Khám phá trong pack', 'go-packs', '', '', 'pack')}</div></div>`);
+  const c = (page === 'battle' ? state.battle?.cardMap?.[id] : null) || CARD_MAP[id];
+  showModal(`<div class="card-detail">${cardView(id, { static: true })}<div><div class="eyebrow" style="color:${RARITIES[c.rarity].color}">${RARITIES[c.rarity].name} · HỆ ${ELEMENTS[c.element].name}</div><h2>${escape(c.name)}</h2><p>${c.type === 'creature' ? 'LINH THÚ' : 'PHÉP THUẬT'} · ${c.cost} năng lượng</p><div class="description">${escape(c.description)}</div><p>Đã sở hữu: ${state.collection[id] || 0}<br>Trong bộ bài: ${state.deck.filter(x => x === id).length} / 2</p>${state.collection[id] ? button('Thêm vào bộ bài', 'add-deck', `data-id="${id}"`, '', 'plus') : button('Khám phá trong pack', 'go-packs', '', '', 'pack')}</div></div>`);
 }
 async function buyPack(id) {
-  const ids = currentUser ? (await onlineMutation('/api/game/pack', { packId: id })).cards : purchasePack(state, id); save(); sound('reveal'); render();
+  let ids;
+  if (currentUser) {
+    try { ids=(await onlineMutation('/api/game/pack',{packId:id,price:PACKS.find(p=>p.id===id)?.price})).cards; }
+    catch(error){if(error.status===409)await refreshCatalog(true);throw error;}
+  } else ids=purchasePack(state,id);
+  save(); sound('reveal'); render();
   packOpening = { id, ids, revealed: new Set() };
   showPack();
 }
 function showPack() {
   const p = PACKS.find(p => p.id === packOpening.id);
-  showModal(`<div class="eyebrow">${icon('spark')} KHOẢNH KHẮC CỦA BẠN</div><h2>${p.name}</h2><p>Bấm từng lá để hé lộ linh thú. Cả 5 thẻ đã được lưu vào bộ sưu tập.</p><div class="reveal-row">${packOpening.ids.map((id, i) => `<button class="reveal-card ${CARD_MAP[id].rarity}" data-action="flip-card" data-index="${i}" aria-label="Lật thẻ thứ ${i + 1}"><div class="reveal-card-inner"><div class="card-back">${icon('bolt')}<strong>LINH THÚ</strong><small>CHẠM ĐỂ KHÁM PHÁ</small></div><div class="card-front">${cardView(id, { static: true })}</div></div></button>`).join('')}</div><div class="actions">${button('Lật tất cả', 'flip-all', '', '', 'spark')}${button(`Mở tiếp · ${p.price} vàng`, 'buy-pack', `data-pack="${p.id}" ${state.coins < p.price ? 'disabled' : ''}`, 'secondary', 'pack')}${button('Về bộ sưu tập', 'go-collection', '', 'secondary', 'arrow')}</div>`, 'pack-modal');
+  showModal(`<div class="eyebrow">${icon('spark')} KHOẢNH KHẮC CỦA BẠN</div><h2>${escape(p.name)}</h2><p>Bấm từng lá để hé lộ linh thú. Cả 5 thẻ đã được lưu vào bộ sưu tập.</p><div class="reveal-row">${packOpening.ids.map((id, i) => `<button class="reveal-card ${CARD_MAP[id].rarity}" data-action="flip-card" data-index="${i}" aria-label="Lật thẻ thứ ${i + 1}"><div class="reveal-card-inner"><div class="card-back">${icon('bolt')}<strong>LINH THÚ</strong><small>CHẠM ĐỂ KHÁM PHÁ</small></div><div class="card-front">${cardView(id, { static: true })}</div></div></button>`).join('')}</div><div class="actions">${button('Lật tất cả', 'flip-all', '', '', 'spark')}${button(`Mở tiếp · ${p.price} vàng`, 'buy-pack', `data-pack="${p.id}" ${state.coins < p.price ? 'disabled' : ''}`, 'secondary', 'pack')}${button('Về bộ sưu tập', 'go-collection', '', 'secondary', 'arrow')}</div>`, 'pack-modal');
 }
 function flipCard(i) {
   if (!packOpening || packOpening.revealed.has(i)) return;
   packOpening.revealed.add(i);
   const c = CARD_MAP[packOpening.ids[i]];
   const node = $(`.reveal-card[data-index="${i}"]`);
-  node?.classList.add('flipped'); node?.setAttribute('aria-label', `${c.name}, ${RARITIES[c.rarity].name}`);
+  node?.classList.add('flipped'); node?.setAttribute('aria-label', `${escape(c.name)}, ${RARITIES[c.rarity].name}`);
   sound('reveal'); if (c.rarity === 'legendary' || c.rarity === 'epic') confetti(c.rarity === 'legendary' ? '#edc57b' : '#c7a0ff');
   if (packOpening.revealed.size === 5) { const all = $('[data-action="flip-all"]'); if (all) { all.disabled = true; all.innerHTML = `${icon('check')} Đã lật 5 thẻ`; } }
 }
@@ -203,13 +213,13 @@ function startMenu() {
   chooseMode();
 }
 function chooseMode() {
-  showModal(`<div class="eyebrow">ĐẤU TRƯỜNG KHỞI NGUYÊN</div><h2>Chọn đối thủ của bạn</h2><p>Bộ bài 20 thẻ của bạn đã sẵn sàng. Mỗi trận là một khởi đầu mới.</p><div class="mode-options"><button class="mode-card" data-action="new-battle" data-mode="ai">${icon('bot')}<strong>Đấu với máy</strong><p>Thách đấu Người gác đền.<br>Thắng +100 vàng · Thua +40 vàng.</p></button><button class="mode-card" data-action="new-battle" data-mode="local">${icon('users')}<strong>Đấu cùng bạn bè</strong><p>2 người luân phiên cùng thiết bị.<br>Người 2 dùng bộ khởi đầu. +60 vàng/trận.</p></button></div><p style="font-size:10px;margin-top:19px">Chế độ bạn bè chơi tại chỗ, không cần tài khoản hay kết nối mạng.</p>`);
+  showModal(`<div class="eyebrow">ĐẤU TRƯỜNG KHỞI NGUYÊN</div><h2>Chọn đối thủ của bạn</h2><p>Bộ bài 20 thẻ của bạn đã sẵn sàng. Mỗi trận là một khởi đầu mới.</p><div class="mode-options"><button class="mode-card" data-action="new-battle" data-mode="ai">${icon('bot')}<strong>Đấu với máy</strong><p>Thách đấu Người gác đền.<br>Thắng +${gameSettings.winGold} vàng · Thua +${gameSettings.lossGold} vàng.</p></button><button class="mode-card" data-action="new-battle" data-mode="local">${icon('users')}<strong>Đấu cùng bạn bè</strong><p>2 người luân phiên cùng thiết bị.<br>Người 2 dùng bộ khởi đầu. +${gameSettings.localGold} vàng/trận.</p></button></div><p style="font-size:10px;margin-top:19px">Chế độ bạn bè chơi tại chỗ, không cần tài khoản hay kết nối mạng.</p>`);
 }
 async function newBattle(mode) {
   if (remoteBusy) throw new Error('Vui lòng đợi lượt đấu hiện tại được lưu xong.');
   battleToken++; aiRunning = false; handoff = false; closeModal(); selectedUnit = null;
   if (currentUser) await onlineMutation('/api/game/battle/start', { mode });
-  else state.battle = createBattle(state.deck, mode === 'ai' ? botDeck() : STARTER_DECK, mode);
+  else { state.battle = createBattle(state.deck, mode === 'ai' ? botDeck() : STARTER_DECK, mode); state.battle.rewardRules = { ...gameSettings }; }
   displayedResult = null; save(); page = 'battle'; render(); sound();
   if (mode === 'local') { handoff = true; render(); showHandoff(); }
 }
@@ -251,7 +261,8 @@ function finishBattle() {
   const b = state.battle; if (!b || b.winner === null || (!currentUser && b.rewarded)) return;
   if (currentUser) { if (displayedResult === b.id) return; displayedResult = b.id; }
   const win = b.winner === 0; const draw = b.winner === 'draw';
-  const reward = b.mode === 'local' ? 60 : win ? 100 : 40;
+  const rules = b.rewardRules || gameSettings;
+  const reward = b.rewardGold ?? (b.mode === 'local' ? rules.localGold : win ? rules.winGold : rules.lossGold);
   if (!currentUser) { b.rewarded = true; state.matches++; state.coins += reward; if (win && b.mode === 'ai') state.wins++; save(); }
   if (page !== 'battle') { toast(`Trận đấu kết thúc. Bạn nhận ${reward} vàng!`); return; }
   const title = draw ? 'Trận đấu hòa!' : b.mode === 'local' ? `Người chơi ${b.winner + 1} chiến thắng!` : win ? 'Chiến thắng rực rỡ!' : 'Một bài học đáng giá.';
@@ -313,9 +324,10 @@ async function loadAdmin() {
   const sequence = ++adminLoad; admin.loading = true; admin.error = '';
   if (page === 'admin') render();
   try {
-    const results = await Promise.all([apiCall('/api/admin/overview'), apiCall(`/api/admin/users?search=${encodeURIComponent(admin.search)}&page=${admin.page}`)]);
+    const results = await Promise.all([apiCall('/api/admin/overview'), apiCall(`/api/admin/users?search=${encodeURIComponent(admin.search)}&page=${admin.page}`), apiCall('/api/admin/config')]);
     if (sequence !== adminLoad || currentUser?.role !== 'admin') return;
-    admin.overview = results[0]; Object.assign(admin, results[1]);
+    admin.overview = results[0]; Object.assign(admin, results[1]); admin.config = results[2];
+    applyCatalog(admin.config.cards, admin.config.packs); gameSettings=admin.config.settings; catalogRevision=admin.config.revision;
   } catch (error) { admin.error = error.message; }
   finally { if (sequence === adminLoad) { admin.loading = false; if (page === 'admin') render(); } }
 }
@@ -326,20 +338,46 @@ async function openAdminUser(id) {
 async function adminMutation(id, operation, data) {
   if (remoteBusy) throw new Error('Đang lưu thao tác quản trị. Vui lòng đợi.');
   remoteBusy = true;
+  const modal=$('.modal');
+  const controls=modal ? [...modal.querySelectorAll('input,select,textarea,button')].map(node=>({node,disabled:node.disabled})) : [];
+  for(const {node} of controls)node.disabled=true;
+  modal?.setAttribute('aria-busy','true');
   try {
     const account = await apiCall(`/api/admin/users/${id}/${operation}`, data);
+    if (account.deleted) { admin.selectedIds.delete(id); closeModal(); await loadAdmin(); toast('Đã xóa tài khoản và các phiên đăng nhập.'); return; }
     if (id === currentUser.id) {
-      state = account.profile;
+      state = account.profile; currentUser = account.user;
       if (operation === 'reset' || operation === 'cancel-battle') { battleToken++; aiRunning = false; handoff = false; }
     }
     admin.selected = account;
     await loadAdmin(); showModal(adminUserContent(account, currentUser.id), 'admin-user-modal'); sound(); toast('Đã cập nhật và ghi nhật ký quản trị.');
-  } finally { remoteBusy = false; }
+  } finally { remoteBusy = false; modal?.removeAttribute('aria-busy'); for(const {node,disabled} of controls)if(node.isConnected)node.disabled=disabled; }
+}
+async function refreshCatalog(force = false) {
+  if (!force && (page === 'admin' || remoteBusy || aiRunning)) return;
+  try {
+    const config = await request('/api/catalog');
+    if (config.revision === catalogRevision) return;
+    const initial = catalogRevision === -1;
+    applyCatalog(config.cards, config.packs); gameSettings = config.settings; catalogRevision = config.revision;
+    if (!initial && packOpening) { closeModal(); toast('Danh mục đã cập nhật. Thẻ vừa mở đã lưu; hãy chọn lại pack.'); }
+    if (initial && !currentUser) { try { state = loadState(localStorage); } catch {} }
+    render();
+  } catch (error) { if (force && catalogRevision !== -1) toast(error.message); }
+}
+function downloadJson(name, value) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json'}));
+  const link = document.createElement('a'); link.href=url; link.download=name; link.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+async function saveManagedConfig(config) {
+  await apiCall('/api/admin/config', { config, revision: admin.config.revision });
+  closeModal(); await refreshCatalog(true); await loadAdmin(); toast('Đã áp dụng cấu hình trên máy chủ.');
 }
 async function refreshSession() {
   if (remoteBusy || aiRunning || document.hidden || authBusy) return;
   try {
     const result = await request('/api/me');
+    if (Object.keys(result.profile.collection).some(id=>!Object.hasOwn(CARD_MAP,id))) await refreshCatalog(true);
     const changed = !currentUser || JSON.stringify(result.profile) !== JSON.stringify(state) || result.user.role !== currentUser.role;
     if (!currentUser) { battleToken++; aiRunning = false; handoff = result.profile.battle?.mode === 'local' && result.profile.battle.winner === null; }
     currentUser = result.user;
@@ -357,6 +395,7 @@ document.addEventListener('click', async event => {
   const target = event.target.closest('[data-action]'); if (!target || target.disabled) return;
   const action = target.dataset.action;
   try {
+    if (gameSettings.maintenance && currentUser?.role !== 'admin' && ['start-menu','new-battle','buy-pack','daily','end-turn','play-card','evolve','attack-unit','attack-hero','confirm-surrender'].includes(action)) throw new Error('Game đang bảo trì. Bạn có thể xem bộ sưu tập và quay lại sau.');
     if (currentUser) {
       let payload;
       if (action === 'play-card') { requireTurn(); payload = { type: 'play', index: Number(target.dataset.index) }; }
@@ -368,9 +407,22 @@ document.addEventListener('click', async event => {
       if (payload) { await onlineBattle(payload); return; }
     }
     switch (action) {
-      case 'auth': showModal(authContent()); break;
-      case 'auth-tab': if (!authBusy) showModal(authContent(target.dataset.mode === 'register')); break;
-      case 'account': showModal(`<div class="eyebrow">TÀI KHOẢN CỦA BẠN</div><h2>${escape(currentUser.displayName)}</h2><p>@${escape(currentUser.username)} · ${currentUser.role === 'admin' ? 'Quản trị viên' : 'Người chơi'}<br>Tiến trình được lưu trên máy chủ.</p><div class="actions">${currentUser.role === 'admin' ? button('Vào trang quản trị', 'open-admin', '', '', 'shield') : ''}${button('Đăng xuất', 'logout', remoteBusy ? 'disabled' : '', 'secondary')}</div>`); break;
+      case 'manager-tab': admin.tab = target.dataset.tab; admin.catalogPage = 1; admin.catalogSearch = ''; render(); break;
+      case 'manager-page': admin.catalogPage = Number(target.dataset.page); render(); break;
+      case 'manager-new': showModal(catalogEditor(target.dataset.kind), 'manager-editor'); break;
+      case 'manager-edit': showModal(catalogEditor(target.dataset.kind, admin.config[target.dataset.kind].find(c=>c.id===target.dataset.id)), 'manager-editor'); break;
+      case 'manager-user-new': showModal(newUserContent()); break;
+      case 'manager-select-user': if (target.checked) admin.selectedIds.add(target.dataset.id); else admin.selectedIds.delete(target.dataset.id); render(); break;
+      case 'manager-select-page': for (const u of admin.users) { if (target.checked) admin.selectedIds.add(u.id); else admin.selectedIds.delete(u.id); } render(); break;
+      case 'manager-bulk': admin.bulkIds = [...admin.selectedIds]; showModal(bulkContent(target.dataset.scope, admin.bulkIds.length)); break;
+      case 'manager-export': downloadJson('linh-thu-du-lieu.json', await apiCall('/api/admin/export')); await loadAdmin(); break;
+      case 'manager-export-config': downloadJson('linh-thu-cau-hinh.json', admin.config); break;
+      case 'manager-import-config': $('#manager-config-file').click(); break;
+      case 'manager-confirm-import': await saveManagedConfig(admin.importedConfig); admin.importedConfig = null; break;
+      case 'manager-delete': showModal(`<div class="eyebrow">XÓA TÀI KHOẢN</div><h2>Xóa @${escape(admin.selected.user.username)}?</h2><p>Toàn bộ tiến trình và phiên đăng nhập của tài khoản này sẽ bị xóa. Nhật ký quản trị được giữ lại.</p><form data-form="manager-delete" data-id="${target.dataset.id}" class="admin-form"><label>Nhập tên đăng nhập để xác nhận<input name="confirm" required autocomplete="off" /></label><p id="manager-form-error" class="form-error" role="alert"></p><button class="button danger" type="submit">Xóa tài khoản</button></form>`); break;
+      case 'auth': showModal(authContent(false,gameSettings)); break;
+      case 'auth-tab': if (!authBusy) showModal(authContent(target.dataset.mode === 'register',gameSettings)); break;
+      case 'account': showModal(`<div class="eyebrow">TÀI KHOẢN CỦA BẠN</div><h2>${escape(currentUser.displayName)}</h2><p>@${escape(currentUser.username)} · ${currentUser.role === 'admin' ? 'Quản trị viên' : 'Người chơi'}<br>Tiến trình được lưu trên máy chủ.</p>${passwordContent()}<div class="actions">${currentUser.role === 'admin' ? button('Vào trang quản trị', 'open-admin', '', '', 'shield') : ''}${button('Đăng xuất', 'logout', remoteBusy ? 'disabled' : '', 'secondary')}</div>`); break;
       case 'open-admin': closeModal(); go('admin'); break;
       case 'logout': if (!remoteBusy) { await apiCall('/api/auth/logout', {}); guestSession(); toast('Đã đăng xuất. Bạn đang chơi ở chế độ khách.'); } break;
       case 'admin-refresh': await loadAdmin(); break;
@@ -389,15 +441,15 @@ document.addEventListener('click', async event => {
       case 'help': helpModal(); break;
       case 'sound': if (currentUser) await onlineMutation('/api/game/preferences', { sound: !state.sound }); else state.sound = !state.sound; save(); render(); sound(); toast(state.sound ? 'Đã bật âm thanh.' : 'Đã tắt âm thanh.'); break;
       case 'daily':
-        if (currentUser) { await onlineMutation('/api/game/daily', {}); render(); sound('win'); toast('Đã nhận 300 vàng và lưu vào tài khoản.'); break; }
+        if (currentUser) { await onlineMutation('/api/game/daily', {}); render(); sound('win'); toast(`Đã nhận ${gameSettings.dailyGold} vàng và lưu vào tài khoản.`); break; }
         if (state.daily === today()) { toast('Bạn đã nhận quà hôm nay. Hẹn gặp lại ngày mai!'); break; }
-        state.coins += 300; state.daily = today(); save(); render(); sound('win'); toast('Đã nhận 300 vàng. Chúc bạn mở được thẻ Huyền thoại!'); break;
+        state.coins += gameSettings.dailyGold; state.daily = today(); save(); render(); sound('win'); toast(`Đã nhận ${gameSettings.dailyGold} vàng. Chúc bạn mở được thẻ Huyền thoại!`); break;
       case 'buy-pack': await buyPack(target.dataset.pack); break;
       case 'flip-card': flipCard(Number(target.dataset.index)); break;
       case 'flip-all': { const opening = packOpening; for (let i = 0; i < 5; i++) { if (!opening || packOpening !== opening) break; flipCard(i); await delay(110); } break; }
       case 'go-collection': closeModal(); go('collection'); break;
       case 'go-packs': closeModal(); go('packs'); break;
-      case 'odds': showModal(`<div class="eyebrow">MINH BẠCH TỪNG LÁ BÀI</div><h2>Cơ hội tìm thấy huyền thoại</h2><p>Mỗi pack có 5 thẻ. Tỉ lệ ngẫu nhiên cơ bản trên mỗi thẻ:</p><table class="odds-table"><tbody>${[['Thường', '56%'], ['Hiếm', '30%'], ['Sử thi', '11,5%'], ['Huyền thoại', '2,5%']].map(([name, value]) => `<tr><td>${name}</td><td>${value}</td></tr>`).join('')}</tbody></table><p>Thẻ thứ 5 được nâng lên ít nhất Hiếm. Riêng pack Thiên Giới nâng lên ít nhất Sử thi. Pack nguyên tố: mỗi lần chọn thẻ có 70% ưu tiên hệ của pack, còn lại chọn trong toàn bộ các hệ.</p><p>Thẻ có thể trùng. Không dùng tiền thật. Mọi pack và vàng chỉ có giá trị trong trò chơi này.</p>${button('Đã hiểu', 'close-modal')}`); break;
+      case 'odds': showModal(`<div class="eyebrow">TỈ LỆ THEO TỪNG PACK</div><h2>Cơ hội tìm thấy huyền thoại</h2>${PACKS.filter(p=>p.enabled!==false).map(p=>`<h3>${escape(p.name)} · ${format(p.price)} vàng</h3><table class="odds-table"><tbody>${Object.entries(RARITIES).map(([key,r])=>`<tr><td>${r.name}</td><td>${p.weights?.[key] ?? ({common:56,rare:30,epic:11.5,legendary:2.5})[key]}%</td></tr>`).join('')}</tbody></table><p>Thẻ thứ 5 ít nhất ${RARITIES[p.guarantee].name}. Ưu tiên hệ ${ELEMENTS[p.element].name}: ${p.elementBias ?? (p.id==='origin'?0:70)}% mỗi lần chọn.</p>`).join('')}<p>Mỗi pack có 5 thẻ. Thẻ có thể trùng; chỉ dùng vàng trong trò chơi.</p>${button('Đã hiểu','close-modal')}`); break;
       case 'detail': detailModal(target.dataset.id); break;
       case 'filter-element': filters.element = target.dataset.element; render(); break;
       case 'add-deck': await addToDeck(target.dataset.id); break;
@@ -435,6 +487,47 @@ document.addEventListener('click', async event => {
 document.addEventListener('submit', async event => {
   const form = event.target.closest('[data-form]'); if (!form) return; event.preventDefault();
   const data = Object.fromEntries(new FormData(form));
+  if (form.dataset.form.startsWith('manager-') || form.dataset.form === 'personal-password') {
+    const submit = event.submitter; if (submit?.disabled) return; if (submit) submit.disabled = true;
+    try {
+      switch (form.dataset.form) {
+        case 'personal-password': {
+          const result = await apiCall('/api/auth/password', data); currentUser = result.user; state = result.profile; closeModal(); render(); toast('Đã đổi mật khẩu và đăng xuất các thiết bị khác.'); break;
+        }
+        case 'manager-search': admin.catalogSearch = data.query; admin.catalogPage = 1; render(); break;
+        case 'manager-settings': {
+          const settings = { ...admin.config.settings, announcement: data.announcement, registrationOpen: data.registrationOpen === 'on', maintenance: data.maintenance === 'on' };
+          for (const key of ['startingGold','dailyGold','winGold','lossGold','localGold']) settings[key] = Number(data[key]);
+          await saveManagedConfig({ ...admin.config, settings }); break;
+        }
+        case 'manager-catalog': {
+          const kind = form.dataset.kind;
+          const item = { name:data.name,element:data.element,enabled:data.enabled==='on' };
+          if (kind === 'cards') {
+            Object.assign(item,{type:data.type || form.dataset.type,rarity:data.rarity,cost:Number(data.cost),description:data.description});
+            if (item.type==='creature') Object.assign(item,{attack:Number(data.attack),health:Number(data.health),form:data.form,skill:data.skill});
+            else item.effect=data.effect;
+          } else Object.assign(item,{subtitle:data.subtitle,tag:data.tag,price:Number(data.price),guarantee:data.guarantee,elementBias:Number(data.elementBias),weights:Object.fromEntries(Object.keys(RARITIES).map(key=>[key,Number(data[`weight-${key}`])]))});
+          await apiCall(`/api/admin/${kind}`,{id:form.dataset.id || undefined,item,revision:admin.config.revision});
+          closeModal(); await refreshCatalog(true); await loadAdmin(); toast('Đã lưu danh mục và áp dụng vào game.'); break;
+        }
+        case 'manager-user-create': {
+          const account = await apiCall('/api/admin/users',data); await loadAdmin(); await openAdminUser(account.user.id); toast('Đã tạo tài khoản.'); break;
+        }
+        case 'manager-account': await adminMutation(form.dataset.id,'account',{displayName:data.displayName,role:data.role || admin.selected.user.role}); break;
+        case 'manager-password': await adminMutation(form.dataset.id,'password',{password:data.password}); break;
+        case 'manager-delete': await adminMutation(form.dataset.id,'delete',{confirm:data.confirm}); break;
+        case 'manager-inventory': await adminMutation(form.dataset.id,'inventory',{cardId:data.cardId,quantity:Number(data.quantity)}); break;
+        case 'manager-deck': await adminMutation(form.dataset.id,'deck',{deck:new FormData(form).getAll('deck').map(value=>value.split('|')[0])}); break;
+        case 'manager-bulk': {
+          const result = await apiCall('/api/admin/bulk',{scope:form.dataset.scope,userIds:admin.bulkIds,action:data.action,amount:Number(data.amount),cardId:data.cardId,quantity:Number(data.quantity),confirm:data.confirm});
+          closeModal(); admin.selectedIds.clear(); const me=await apiCall('/api/me'); state=me.profile; currentUser=me.user; await loadAdmin(); toast(`Đã cập nhật ${result.count} tài khoản.`); break;
+        }
+      }
+    } catch (error) { const node=$('#manager-form-error'); if (node) node.textContent=error.message; else toast(error.message); }
+    finally { if (submit?.isConnected) submit.disabled = false; }
+    return;
+  }
   if (form.dataset.form === 'auth') {
     if (authBusy) return; authBusy = true;
     const submit = form.querySelector('[type="submit"]'); submit.disabled = true;
@@ -458,7 +551,14 @@ document.addEventListener('input', event => {
   $('#collection-grid').innerHTML = collectionGrid(page === 'deck');
   if ($('#filter-count')) $('#filter-count').textContent = `${filteredCards().length} kết quả`;
 });
-document.addEventListener('change', event => {
+document.addEventListener('change', async event => {
+  if (event.target.id==='manager-config-file') {
+    const file=event.target.files[0]; event.target.value=''; if(!file)return;
+    try { if(file.size>1048576)throw new Error('Tệp cấu hình tối đa 1 MB.'); const parsed=JSON.parse(await file.text()); const value=parsed.config || parsed; if(value.version!==1 || !Array.isArray(value.cards) || !Array.isArray(value.packs))throw new Error('Tệp không phải cấu hình Linh Thú.'); admin.importedConfig=value; showModal(`<div class="eyebrow">KHÔI PHỤC CẤU HÌNH</div><h2>Áp dụng cấu hình từ tệp?</h2><p>${escape(file.name)} · ${value.cards.length} thẻ · ${value.packs.length} pack. Thay đổi danh mục, giá và phần thưởng; không thay thế tài khoản.</p><div class="actions">${button('Áp dụng cấu hình','manager-confirm-import','','danger')}${button('Hủy','close-modal','','secondary')}</div>`); }
+    catch(error){toast(error.message);} return;
+  }
+  if (event.target.name==='type' && event.target.closest('[data-form="manager-catalog"]')) { const form=event.target.closest('form'); for(const node of form.querySelectorAll('[data-creature-fields]'))node.hidden=event.target.value!=='creature'; for(const node of form.querySelectorAll('[data-spell-fields]'))node.hidden=event.target.value!=='spell'; return; }
+  if (event.target.name==='action' && event.target.closest('[data-form="manager-bulk"]')) { const form=event.target.closest('form'); form.querySelector('[data-bulk-gold]').hidden=event.target.value!=='gold'; form.querySelector('[data-bulk-cards]').hidden=event.target.value!=='cards'; return; }
   if (event.target.id === 'rarity-filter') filters.rarity = event.target.value;
   else if (event.target.id === 'owned-filter') filters.owned = event.target.value;
   else return;
@@ -468,13 +568,13 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Escape') { if ($('#modal-root').children.length) closeModal(); else { $('.sidebar')?.classList.remove('open'); $('.mobile-overlay')?.classList.remove('open'); } }
   if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-action="attack-hero"]')) { event.preventDefault(); event.target.click(); }
   if (event.key === 'Tab' && $('.modal')) {
-    const nodes = [...$('.modal').querySelectorAll('button:not(:disabled):not([hidden]),input,select,[tabindex="0"]')].filter(n => n.offsetParent !== null);
+    const nodes = [...$('.modal').querySelectorAll('button:not(:disabled):not([hidden]),input,select,textarea,[tabindex="0"]')].filter(n => n.offsetParent !== null && !n.disabled);
     const first = nodes[0], last = nodes.at(-1);
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
   }
 });
 render();
-refreshSession();
+(async () => { await refreshCatalog(true); await refreshSession(); if (!currentUser && state.battle?.mode === 'ai' && state.battle.turn === 1 && state.battle.winner === null) runAi(); })();
 setInterval(refreshSession, 15000);
-if (state.battle?.mode === 'ai' && state.battle.turn === 1 && state.battle.winner === null) runAi();
+setInterval(refreshCatalog, 30000);

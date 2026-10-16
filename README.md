@@ -28,6 +28,20 @@ Không có mật khẩu mặc định hoặc đường API tự cấp quyền ad
 
 Admin có thể tìm người chơi, xem vàng/thẻ/thành tích, cộng hoặc trừ vàng, cấp một loại thẻ hoặc cả 96 loại, khóa/mở khóa tài khoản, hủy trận đang chơi và đặt lại tiến trình. Các thao tác được kiểm tra quyền trên máy chủ và ghi nhật ký cùng người thực hiện, đối tượng và thời điểm. Khóa tài khoản thu hồi mọi phiên đăng nhập; không cho phép admin tự khóa mình.
 
+## Quản trị toàn bộ game
+
+Trong **Quản trị** có các mục Người chơi, Thẻ bài, Pack, Cấu hình và Nhật ký:
+
+- **Tài khoản:** tạo người chơi hoặc admin, sửa tên hiển thị, cấp/hạ quyền, đặt lại mật khẩu, khóa/mở khóa và xóa tài khoản. Không cho phép xóa, khóa hoặc hạ quyền chính mình; luôn giữ một admin hoạt động. Xóa tài khoản cần nhập đúng tên đăng nhập. Đổi mật khẩu của bản thân trong menu tài khoản; các thiết bị khác sẽ bị đăng xuất.
+- **Thẻ và bộ bài của người chơi:** cấp thẻ, đặt số lượng chính xác hoặc thu hồi về 0; bộ bài tự bỏ bản sao không còn sở hữu. Admin cũng có thể chọn lại bộ bài 20 thẻ từ các bản sao người chơi sở hữu.
+- **Danh mục thẻ:** thêm linh thú/phép thuật, sửa tên, mô tả, hệ, độ hiếm, năng lượng, công/sinh lực, hình SVG và kỹ năng; ngừng phát hành khi cần. Có thể mở rộng từ 96 lên tối đa 500 thẻ. Mã và loại thẻ đã phát hành được giữ ổn định để bảo toàn bộ sưu tập.
+- **Pack:** thêm/sửa tối đa 30 pack, tên, giá, nhãn, hệ ưu tiên, tỉ lệ bốn độ hiếm (tổng 100%), độ hiếm bảo đảm ở lá thứ 5 và trạng thái phát hành. Tỉ lệ công khai trong game lấy trực tiếp từ cấu hình. Giao diện mua pack phát hiện giá đã thay đổi để người chơi xem lại trước khi trả vàng.
+- **Cấu hình game:** vàng khởi đầu, quà hằng ngày, thưởng thắng/thua/hai người, đóng/mở đăng ký, thông báo toàn game và bảo trì. Bảo trì chặn thao tác game của người chơi nhưng admin vẫn có thể thử nghiệm. Tài khoản mới dùng mức vàng mới; không tự sửa vàng của tài khoản cũ.
+- **Hàng loạt:** chọn từng tài khoản, chọn cả trang hoặc áp dụng cho toàn bộ tài khoản vai trò người chơi (không gồm admin). Hỗ trợ cộng/trừ vàng, cấp thẻ, khóa/mở khóa, hủy trận và đặt lại tiến trình, tối đa 1.000 tài khoản mỗi lần. Phải nhập `XÁC NHẬN`; toàn bộ thay đổi cùng thành công hoặc cùng hủy khi có lỗi.
+- **Thống kê, nhật ký và xuất dữ liệu:** xem số người chơi, hoạt động gần đây, tài khoản khóa, tổng vàng, pack và trận đang chơi; xem lịch sử người thực hiện và đối tượng. Tải/nhập cấu hình JSON tối đa 1 MB. Không được nhập bản cấu hình làm mất mã thẻ/pack đã phát hành; cần giữ các mục đó và tắt phát hành. Xuất dữ liệu người chơi dạng JSON không chứa mật khẩu hay phiên đăng nhập; đây không phải bản sao lưu tài khoản SQLite đầy đủ.
+
+Mỗi lần lưu cấu hình có số phiên bản: nếu admin khác đã sửa trước đó, máy chủ yêu cầu tải lại thay vì ghi đè. Trận đấu giữ ảnh chụp chỉ số thẻ và mức thưởng lúc bắt đầu; chỉnh cân bằng không làm thay đổi trận đang diễn ra. Cấu hình được lưu trong SQLite và được giao diện chơi cập nhật định kỳ.
+
 Người chơi online được lưu vàng, pack, bộ bài, kỹ năng/trận đấu và phần thưởng ở máy chủ. Client không được tự ghi số vàng hay quyền tài khoản; hai lần nhận quà cùng ngày hoặc gửi lại yêu cầu nhận thưởng không cộng thưởng hai lần. Trang người chơi cập nhật thay đổi từ máy chủ định kỳ. Tiến trình khách không tự nhập vào tài khoản online; tài khoản mới có bộ khởi đầu riêng.
 
 ## Lưu dữ liệu và đưa game lên mạng
@@ -55,7 +69,7 @@ Người chơi online được lưu vàng, pack, bộ bài, kỹ năng/trận đ
 npm test
 ```
 
-31 bài kiểm tra luật, dữ liệu và API: gồm 2.000 lần mở pack, các kỹ năng/phép, 40 trận mô phỏng có seed, đăng nhập/đăng xuất, mật khẩu băm, phân quyền, giới hạn đăng nhập sai, chặn yêu cầu khác nguồn, khóa tài khoản, dữ liệu SQLite sau khi mở lại, hai thiết bị gửi cùng lượt, tài nguyên được kiểm soát bởi máy chủ và phần thưởng chỉ cấp một lần. Các bài API mở máy chủ tạm trên cổng tự chọn và dùng cơ sở dữ liệu thử nghiệm riêng.
+47 bài kiểm tra luật, dữ liệu và API: gồm 2.000 lần mở pack, 40 trận mô phỏng, đăng nhập/đăng xuất, mật khẩu băm, phân quyền và thu hồi quyền khi yêu cầu đang gửi, khóa tài khoản, SQLite, hai thiết bị gửi cùng lượt, thẻ tự tạo dùng được trong trận, giá/tỉ lệ pack thực tế, ảnh chụp cân bằng/thưởng, cấu hình xung đột, bảo trì, CRUD tài khoản, thu hồi thẻ/bộ bài, hàng loạt thành công hoặc hủy toàn bộ, xuất dữ liệu không có thông tin xác thực và danh mục 500 thẻ với mô tả tiếng Việt dài. Các bài API mở máy chủ tạm trên cổng tự chọn và dùng cơ sở dữ liệu thử nghiệm riêng.
 
 Kiểm tra giao diện bằng Python Playwright và Chromium (đã có trong môi trường cloud):
 
@@ -64,10 +78,10 @@ Kiểm tra giao diện bằng Python Playwright và Chromium (đã có trong mô
 python3 tests/browser_smoke.py
 
 # Bộ kiểm tra online tự mở máy chủ và SQLite tạm, không dùng dữ liệu thật.
-python3 tests/online_browser.py
+python3 tests/management_browser.py
 ```
 
-8 kịch bản trình duyệt chơi khách và 4 kịch bản nhiều tài khoản/admin kiểm tra desktop/mobile, mở pack, tìm kiếm/bộ bài, chiến đấu/phần thưởng, đăng nhập lại, dữ liệu tách biệt giữa người chơi, cấp vàng/thẻ, nhật ký, khóa/mở khóa và ngăn giả mạo quyền trong localStorage. Ảnh kiểm tra ghi vào `/tmp/linh-thu-screenshots`. Có thể đặt `GAME_URL` cho bộ kiểm tra khách và `CHROMIUM_PATH` cho cả hai bộ khi chạy ở môi trường khác.
+8 kịch bản trình duyệt chơi khách và 9 kịch bản online/quản trị kiểm tra desktop/mobile, mở pack, tìm kiếm/bộ bài, chiến đấu/phần thưởng, đăng nhập lại, tách dữ liệu giữa người chơi, cấp vàng/thẻ, nhật ký, khóa/mở khóa, ngăn giả mạo quyền, tạo thẻ/pack, giá/tỉ lệ thực tế, cấu hình/bảo trì/đăng ký, hàng loạt, thu hồi thẻ, phân quyền/xóa tài khoản, mật khẩu và xuất/nhập cấu hình. Bộ quản trị kế thừa 4 kiểm tra online cơ bản trong `tests/online_browser.py`. Ảnh kiểm tra ghi vào `/tmp/linh-thu-screenshots`. Có thể đặt `GAME_URL` cho bộ kiểm tra khách và `CHROMIUM_PATH` cho cả hai bộ khi chạy ở môi trường khác.
 
 ## Cấu trúc
 
@@ -81,6 +95,9 @@ python3 tests/online_browser.py
 - `server.mjs`: máy chủ HTTP/API và tài nguyên frontend.
 - `server/api.js`: xác thực, phân quyền, tài nguyên và trận đấu được xử lý ở máy chủ.
 - `server/store.js`: SQLite, băm mật khẩu, phiên đăng nhập và nhật ký quản trị.
+- `server/config.js`: mặc định, kiểm tra cấu hình và giới hạn danh mục.
+- `server/management.js`: quản lý danh mục, tài khoản, hàng loạt và xuất dữ liệu.
+- `src/management.js`: giao diện và biểu mẫu quản trị toàn bộ.
 - `scripts/admin.mjs`: cấp quyền admin từ terminal máy chủ.
 
 Dùng checkout hiện có khi phát triển; mỗi tác vụ cloud đã được cách ly, không cần tạo Git worktree.

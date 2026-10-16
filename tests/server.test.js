@@ -8,7 +8,7 @@ import { Store, verifyPassword } from '../server/store.js';
 import { createServer } from '../server.mjs';
 import { CARDS, STARTER_DECK } from '../src/cards.js';
 
-async function fixture(t, filename = ':memory:') {
+export async function fixture(t, filename = ':memory:') {
   const store = new Store(filename), server = createServer(store);
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const url = `http://127.0.0.1:${server.address().port}`;
