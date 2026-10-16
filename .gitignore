@@ -2,3 +2,7 @@ node_modules/
 artifacts/
 *.log
 __pycache__/
+.data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

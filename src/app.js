@@ -2,6 +2,7 @@ import { CARDS, CARD_MAP, ELEMENTS, RARITIES, PACKS, STARTER_DECK } from './card
 import { createBattle, playCard, attack, evolve, endTurn, aiStep, botDeck } from './engine.js';
 import { freshState, loadState, purchasePack, validateDeck, STORAGE_KEY } from './state.js';
 import { icon, creatureArt, packArt } from './art.js';
+import { request, authContent, adminContent, adminUserContent } from './online.js';
 
 let state;
 try { state = loadState(localStorage); } catch { state = freshState(); }
@@ -16,14 +17,20 @@ let toastTimer;
 let lastFocus;
 let storageWarning = false;
 let audioContext;
+let currentUser = null;
+let remoteBusy = false;
+let authBusy = false;
+let displayedResult = null;
+const admin = { overview: null, users: [], total: 0, page: 1, search: '', loading: false, error: '', selected: null };
 const $ = (selector) => document.querySelector(selector);
 const format = n => Number(n).toLocaleString('vi-VN');
 const ownedCount = () => Object.keys(state.collection).filter(id => state.collection[id] > 0).length;
-const today = () => new Date().toLocaleDateString('sv-SE');
+const today = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date());
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const escape = text => String(text).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
 function save() {
+  if (currentUser) return;
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
   catch { if (!storageWarning) { storageWarning = true; toast('Trình duyệt không cho phép lưu. Tiến trình chỉ giữ trong phiên này.'); } }
 }
@@ -59,14 +66,15 @@ function cardView(id, options = {}) {
 }
 function heroCard(id) { return `<div class="hero-card">${creatureArt(CARD_MAP[id], '', true)}<div class="hero-card-title">${CARD_MAP[id].name}</div><div class="hero-card-rarity">✦ HUYỀN THOẠI ✦</div></div>`; }
 function render() {
-  const names = { home: 'Khám phá', packs: 'Mở túi thẻ', collection: 'Bộ sưu tập', deck: 'Bộ bài của bạn', battle: 'Đấu trường' };
+  const names = { home: 'Khám phá', packs: 'Mở túi thẻ', collection: 'Bộ sưu tập', deck: 'Bộ bài của bạn', battle: 'Đấu trường', admin: 'Quản trị' };
   const nav = [['home', 'grid', 'Khám phá'], ['packs', 'pack', 'Mở túi thẻ'], ['collection', 'cards', 'Bộ sưu tập'], ['deck', 'shield', 'Bộ bài của bạn'], ['battle', 'sword', 'Đấu trường']];
+  if (currentUser?.role === 'admin') nav.push(['admin', 'users', 'Quản trị']);
   $('#app').innerHTML = `<div class="shell"><div class="mobile-overlay" data-action="close-menu"></div><aside class="sidebar">
     <button class="brand" data-action="nav" data-page="home" aria-label="Linh Thú — trang chủ"><span class="brand-symbol">${icon('bolt')}</span><span><span class="brand-name">LINH THÚ</span><span class="brand-sub">TRADING CARD GAME</span></span></button>
     <div class="nav-label">THẾ GIỚI CỦA BẠN</div><nav class="nav" aria-label="Điều hướng chính">${nav.map(([key, glyph, label]) => `<button class="nav-item ${page === key ? 'active' : ''}" data-action="nav" data-page="${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span>${key === 'packs' ? '<small>MỚI</small>' : ''}</button>`).join('')}</nav>
     <div class="sidebar-bottom"><div class="season-card"><div>${icon('trophy')} HÀNH TRÌNH KHỞI NGUYÊN</div><p>Mỗi lá bài là một câu chuyện.<br>Huyền thoại của bạn bắt đầu từ đây.</p><button data-action="daily">Quà mỗi ngày ${icon(state.daily === today() ? 'check' : 'gift')}</button></div><div class="utility"><button data-action="help">${icon('help')} Cách chơi</button><button data-action="sound" aria-label="${state.sound ? 'Tắt' : 'Bật'} âm thanh" title="${state.sound ? 'Tắt' : 'Bật'} âm thanh">${icon(state.sound ? 'volume' : 'mute')}</button></div></div>
-  </aside><main class="main"><header class="topbar"><div class="breadcrumb"><button class="mobile-menu" data-action="menu" aria-label="Mở điều hướng">${icon('menu')}</button><span>Không gian triệu hồi</span>${icon('chevron')}<strong>${names[page]}</strong></div><div class="account"><button class="balance" data-action="daily" title="Nhận quà vàng mỗi ngày" style="background:none;padding:0">${icon('coin', 'coin-icon')} ${format(state.coins)} <small>VÀNG</small></button><div class="divider"></div><div class="profile"><span class="avatar">${icon('user')}</span><span><strong>Tân triệu hồi sư</strong><small>${state.wins} chiến thắng · Cấp ${Math.floor(state.wins / 3) + 1}</small></span></div></div></header><div class="content">${page === 'home' ? homePage() : page === 'packs' ? packsPage() : page === 'collection' ? collectionPage() : page === 'deck' ? deckPage() : battlePage()}<footer class="footer"><span>© 2026 LINH THÚ · Một thế giới, vô vàn huyền thoại.</span><span>${icon('shield')} Tiến trình lưu trên thiết bị này</span></footer></div></main></div>`;
-  if (page === 'battle' && state.battle?.winner !== null && state.battle && !state.battle.rewarded) finishBattle();
+  </aside><main class="main"><header class="topbar"><div class="breadcrumb"><button class="mobile-menu" data-action="menu" aria-label="Mở điều hướng">${icon('menu')}</button><span>Không gian triệu hồi</span>${icon('chevron')}<strong>${names[page]}</strong></div><div class="account"><button class="balance" data-action="daily" title="Nhận quà vàng mỗi ngày" style="background:none;padding:0">${icon('coin', 'coin-icon')} ${format(state.coins)} <small>VÀNG</small></button><div class="divider"></div>${currentUser ? `<button class="profile profile-button" data-action="account" aria-label="Tài khoản ${escape(currentUser.username)}"><span class="avatar">${icon(currentUser.role === 'admin' ? 'shield' : 'user')}</span><span><strong>${escape(currentUser.displayName)}</strong><small>${currentUser.role === 'admin' ? 'QUẢN TRỊ VIÊN' : `${state.wins} chiến thắng · Cấp ${Math.floor(state.wins / 3) + 1}`}</small></span></button>` : button('Đăng nhập', 'auth', '', 'small secondary', 'user')}</div></header><div class="content">${page === 'home' ? homePage() : page === 'packs' ? packsPage() : page === 'collection' ? collectionPage() : page === 'deck' ? deckPage() : page === 'admin' ? adminPage() : battlePage()}<footer class="footer"><span>© 2026 LINH THÚ · Một thế giới, vô vàn huyền thoại.</span><span>${icon('shield')} ${currentUser ? 'Tiến trình lưu trên máy chủ' : 'Đang chơi khách · Lưu trên thiết bị'}</span></footer></div></main></div>`;
+  if (!currentUser && page === 'battle' && state.battle?.winner !== null && state.battle && !state.battle.rewarded) finishBattle();
 }
 function heading(eyebrow, title, subtitle, action = '') { return `<div class="page-heading"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`; }
 function packTiles() {
@@ -104,7 +112,7 @@ function battlePage() {
   const b = state.battle;
   if (!b) return `${heading('NƠI HUYỀN THOẠI ĐƯỢC VIẾT NÊN', 'Đấu trường linh thú', 'Triệu hồi. Tiến hóa. Làm chủ cuộc đấu.', button('Luật chiến đấu', 'help', '', 'secondary', 'help'))}<div class="battle-welcome"><div><div class="eyebrow">ĐẤU TRÍ TRONG TỪNG LÁ BÀI</div><h2>Sức mạnh là khởi đầu.<br>Chiến thuật là tất cả.</h2><p>Đưa bộ bài 20 thẻ của bạn vào đấu trường. Triệu hồi linh thú, sử dụng phép và tiến hóa để giành chiến thắng.</p><div class="actions">${button('Tìm trận đấu', 'start-menu', '', '', 'sword')}${button('Chỉnh bộ bài', 'nav', 'data-page="deck"', 'secondary', 'cards')}</div></div><div class="welcome-art">${heroCard('fire-12')}${heroCard('water-12')}</div></div><div class="battle-options"><div>${icon('bot')}<h3>Thử thách người gác đền</h3><p>Đấu với máy, luyện chiến thuật và nhận vàng sau mỗi trận.</p></div><div>${icon('users')}<h3>Cùng bạn bè so tài</h3><p>Hai người chơi luân phiên trên cùng thiết bị. Tay bài được giữ kín.</p></div><div>${icon('spark')}<h3>Tiến hóa sức mạnh</h3><p>Dùng 2 năng lượng để tiến hóa: +2 tấn công, +3 sinh lực.</p></div></div>`;
   const side = b.mode === 'local' ? b.turn : 0; const own = b.players[side]; const enemy = b.players[1 - side];
-  const myTurn = b.turn === side && b.winner === null && !handoff;
+  const myTurn = b.turn === side && b.winner === null && !handoff && !remoteBusy;
   const ownName = b.mode === 'ai' ? 'Bạn' : `Người chơi ${side + 1}`;
   const enemyName = b.mode === 'ai' ? 'Người gác đền' : `Người chơi ${2 - side}`;
   const selected = own.board.find(c => c.uid === selectedUnit);
@@ -140,14 +148,14 @@ function closeModal() {
   if (lastFocus?.isConnected) lastFocus.focus();
 }
 function helpModal() {
-  showModal(`<div class="eyebrow">CẨM NANG TRIỆU HỒI SƯ</div><h2>Mỗi lá bài, một nước đi.</h2><p>Đưa sinh lực đối thủ từ 24 về 0 để giành chiến thắng.</p><ol class="rules"><li><strong>Xây bộ bài:</strong> chọn đúng 20 thẻ đã sở hữu, tối đa 2 bản sao mỗi loại. Bạn đã có sẵn bộ khởi đầu.</li><li><strong>Triệu hồi & dùng phép:</strong> bấm thẻ trên tay để dùng. Tiêu hao năng lượng bằng con số trên thẻ. Mỗi lượt được hồi đầy và tăng 1 năng lượng, tối đa 10.</li><li><strong>Tấn công:</strong> chọn thú của bạn, rồi chọn thú địch. Hai thú gây sát thương đồng thời. Khi sân địch trống, bấm thanh sinh lực đối thủ.</li><li><strong>Tiến hóa:</strong> chọn thú rồi bấm Tiến hóa. Tốn 2 năng lượng, nhận +2 công và +3 sinh lực; mỗi thú một lần.</li><li><strong>Kỹ năng hệ:</strong> Hỏa gây sát thương khi gọi · Thủy hồi máu · Mộc hồi thú · Lôi tốc kích · Quang có khiên · Ám hút máu.</li><li><strong>Giới hạn:</strong> 4 thú trên sân, 9 thẻ trên tay. Cạn bộ bài sẽ mất sinh lực tăng dần mỗi lượt. Thú mới cần đợi lượt tiếp theo (trừ Lôi).</li><li><strong>Phần thưởng:</strong> thắng +100 vàng, thua +40, hai người +60. Mở pack để mở rộng bộ sưu tập. Tiến trình lưu trên trình duyệt này.</li></ol>${button('Đã hiểu, vào game!', 'close-modal', '', '', 'check')}`);
+  showModal(`<div class="eyebrow">CẨM NANG TRIỆU HỒI SƯ</div><h2>Mỗi lá bài, một nước đi.</h2><p>Đưa sinh lực đối thủ từ 24 về 0 để giành chiến thắng.</p><ol class="rules"><li><strong>Xây bộ bài:</strong> chọn đúng 20 thẻ đã sở hữu, tối đa 2 bản sao mỗi loại. Bạn đã có sẵn bộ khởi đầu.</li><li><strong>Triệu hồi & dùng phép:</strong> bấm thẻ trên tay để dùng. Tiêu hao năng lượng bằng con số trên thẻ. Mỗi lượt được hồi đầy và tăng 1 năng lượng, tối đa 10.</li><li><strong>Tấn công:</strong> chọn thú của bạn, rồi chọn thú địch. Hai thú gây sát thương đồng thời. Khi sân địch trống, bấm thanh sinh lực đối thủ.</li><li><strong>Tiến hóa:</strong> chọn thú rồi bấm Tiến hóa. Tốn 2 năng lượng, nhận +2 công và +3 sinh lực; mỗi thú một lần.</li><li><strong>Kỹ năng hệ:</strong> Hỏa gây sát thương khi gọi · Thủy hồi máu · Mộc hồi thú · Lôi tốc kích · Quang có khiên · Ám hút máu.</li><li><strong>Giới hạn:</strong> 4 thú trên sân, 9 thẻ trên tay. Cạn bộ bài sẽ mất sinh lực tăng dần mỗi lượt. Thú mới cần đợi lượt tiếp theo (trừ Lôi).</li><li><strong>Phần thưởng:</strong> thắng +100 vàng, thua +40, hai người +60. Mở pack để mở rộng bộ sưu tập. ${currentUser ? 'Tiến trình lưu trên máy chủ.' : 'Tiến trình khách lưu trên trình duyệt này.'}</li></ol>${button('Đã hiểu, vào game!', 'close-modal', '', '', 'check')}`);
 }
 function detailModal(id) {
   const c = CARD_MAP[id];
   showModal(`<div class="card-detail">${cardView(id, { static: true })}<div><div class="eyebrow" style="color:${RARITIES[c.rarity].color}">${RARITIES[c.rarity].name} · HỆ ${ELEMENTS[c.element].name}</div><h2>${c.name}</h2><p>${c.type === 'creature' ? 'LINH THÚ' : 'PHÉP THUẬT'} · ${c.cost} năng lượng</p><div class="description">${c.description}</div><p>Đã sở hữu: ${state.collection[id] || 0}<br>Trong bộ bài: ${state.deck.filter(x => x === id).length} / 2</p>${state.collection[id] ? button('Thêm vào bộ bài', 'add-deck', `data-id="${id}"`, '', 'plus') : button('Khám phá trong pack', 'go-packs', '', '', 'pack')}</div></div>`);
 }
-function buyPack(id) {
-  const ids = purchasePack(state, id); save(); sound('reveal'); render();
+async function buyPack(id) {
+  const ids = currentUser ? (await onlineMutation('/api/game/pack', { packId: id })).cards : purchasePack(state, id); save(); sound('reveal'); render();
   packOpening = { id, ids, revealed: new Set() };
   showPack();
 }
@@ -180,12 +188,13 @@ function battleFx(kind, element, label, targetUid) {
   node.innerHTML = `<i class="fx-ring"></i><i class="fx-ring ring-two"></i><i class="fx-slash"></i><span>${escape(label)}</span>`;
   arena.append(node); setTimeout(() => node.remove(), 1200);
 }
-function addToDeck(id) {
+async function addToDeck(id) {
   const inDeck = state.deck.filter(x => x === id).length;
   if (state.deck.length >= 20) throw new Error('Bộ bài đã đủ 20 thẻ. Hãy bỏ một thẻ trong mục Bộ bài trước.');
   if (inDeck >= 2) throw new Error('Mỗi bộ bài chỉ được tối đa 2 bản sao một thẻ.');
   if ((state.collection[id] || 0) <= inDeck) throw new Error('Bạn chưa sở hữu thêm bản sao của thẻ này.');
-  state.deck.push(id); save(); sound(); render(); toast(`Đã thêm ${CARD_MAP[id].name} (${state.deck.length}/20).`);
+  if (currentUser) await onlineMutation('/api/game/deck', { deck: [...state.deck, id] }); else state.deck.push(id);
+  save(); sound(); render(); toast(`Đã thêm ${CARD_MAP[id].name} (${state.deck.length}/20).`);
   if ($('.card-detail')) detailModal(id);
 }
 function startMenu() {
@@ -196,9 +205,12 @@ function startMenu() {
 function chooseMode() {
   showModal(`<div class="eyebrow">ĐẤU TRƯỜNG KHỞI NGUYÊN</div><h2>Chọn đối thủ của bạn</h2><p>Bộ bài 20 thẻ của bạn đã sẵn sàng. Mỗi trận là một khởi đầu mới.</p><div class="mode-options"><button class="mode-card" data-action="new-battle" data-mode="ai">${icon('bot')}<strong>Đấu với máy</strong><p>Thách đấu Người gác đền.<br>Thắng +100 vàng · Thua +40 vàng.</p></button><button class="mode-card" data-action="new-battle" data-mode="local">${icon('users')}<strong>Đấu cùng bạn bè</strong><p>2 người luân phiên cùng thiết bị.<br>Người 2 dùng bộ khởi đầu. +60 vàng/trận.</p></button></div><p style="font-size:10px;margin-top:19px">Chế độ bạn bè chơi tại chỗ, không cần tài khoản hay kết nối mạng.</p>`);
 }
-function newBattle(mode) {
+async function newBattle(mode) {
+  if (remoteBusy) throw new Error('Vui lòng đợi lượt đấu hiện tại được lưu xong.');
   battleToken++; aiRunning = false; handoff = false; closeModal(); selectedUnit = null;
-  state.battle = createBattle(state.deck, mode === 'ai' ? botDeck() : STARTER_DECK, mode); save(); page = 'battle'; render(); sound();
+  if (currentUser) await onlineMutation('/api/game/battle/start', { mode });
+  else state.battle = createBattle(state.deck, mode === 'ai' ? botDeck() : STARTER_DECK, mode);
+  displayedResult = null; save(); page = 'battle'; render(); sound();
   if (mode === 'local') { handoff = true; render(); showHandoff(); }
 }
 function showHandoff() {
@@ -207,7 +219,7 @@ function showHandoff() {
 }
 function ownSide() { return state.battle.mode === 'local' ? state.battle.turn : 0; }
 function requireTurn() {
-  if (!state.battle || handoff || (state.battle.mode === 'ai' && state.battle.turn !== 0)) throw new Error('Đợi đến lượt của bạn nhé.');
+  if (remoteBusy || !state.battle || handoff || (state.battle.mode === 'ai' && state.battle.turn !== 0)) throw new Error('Đợi đến lượt của bạn nhé.');
   return ownSide();
 }
 function afterAction(fx, uid) {
@@ -216,6 +228,7 @@ function afterAction(fx, uid) {
   if (state.battle.winner !== null) finishBattle();
 }
 async function runAi() {
+  if (currentUser) return;
   if (aiRunning || !state.battle || state.battle.mode !== 'ai' || state.battle.turn !== 1 || state.battle.winner !== null) return;
   aiRunning = true; const token = battleToken;
   try {
@@ -235,38 +248,151 @@ async function runAi() {
   finally { if (token === battleToken) aiRunning = false; }
 }
 function finishBattle() {
-  const b = state.battle; if (!b || b.winner === null || b.rewarded) return;
-  b.rewarded = true; state.matches++;
+  const b = state.battle; if (!b || b.winner === null || (!currentUser && b.rewarded)) return;
+  if (currentUser) { if (displayedResult === b.id) return; displayedResult = b.id; }
   const win = b.winner === 0; const draw = b.winner === 'draw';
   const reward = b.mode === 'local' ? 60 : win ? 100 : 40;
-  state.coins += reward; if (win && b.mode === 'ai') state.wins++; save();
+  if (!currentUser) { b.rewarded = true; state.matches++; state.coins += reward; if (win && b.mode === 'ai') state.wins++; save(); }
   if (page !== 'battle') { toast(`Trận đấu kết thúc. Bạn nhận ${reward} vàng!`); return; }
   const title = draw ? 'Trận đấu hòa!' : b.mode === 'local' ? `Người chơi ${b.winner + 1} chiến thắng!` : win ? 'Chiến thắng rực rỡ!' : 'Một bài học đáng giá.';
   showModal(`<div class="battle-result"><div class="result-icon">${icon(win || b.mode === 'local' ? 'trophy' : 'shield')}</div><div class="eyebrow" style="justify-content:center">ĐẤU TRƯỜNG KHỞI NGUYÊN</div><h2>${title}</h2><p>${win ? 'Linh thú của bạn đã viết nên một huyền thoại mới.' : 'Mỗi trận đấu là một bước tiến trên hành trình của bạn.'}</p><div class="price">${icon('coin')} +${reward} vàng</div><p>Trận đấu kết thúc ở lượt ${b.round}. Phần thưởng đã được lưu.</p><div class="actions">${button('Chơi trận mới', 'choose-mode', '', '', 'sword')}${button('Mở pack', 'go-packs', '', 'secondary', 'pack')}</div></div>`);
   if (win || b.mode === 'local') { confetti(); sound('win'); }
   const bal = $('.balance'); if (bal) bal.innerHTML = `${icon('coin', 'coin-icon')} ${format(state.coins)} <small>VÀNG</small>`;
 }
+function guestSession() {
+  battleToken++; aiRunning = false; remoteBusy = false; handoff = false; currentUser = null; selectedUnit = null;
+  try { state = loadState(localStorage); } catch { state = freshState(); }
+  admin.overview = null; admin.users = []; admin.selected = null;
+  closeModal(); page = 'home'; render();
+}
+async function apiCall(route, data) {
+  try { return await request(route, data); }
+  catch (error) { if (error.status === 401 && currentUser) { guestSession(); toast('Phiên đăng nhập đã kết thúc hoặc tài khoản bị khóa.'); } throw error; }
+}
+async function onlineMutation(route, data) {
+  if (remoteBusy) throw new Error('Đang lưu dữ liệu. Vui lòng đợi một chút.');
+  remoteBusy = true;
+  try { const result = await apiCall(route, data); currentUser = result.user; state = result.profile; return result; }
+  finally { remoteBusy = false; }
+}
+async function onlineBattle(payload) {
+  if (remoteBusy) throw new Error('Đang xử lý lượt đấu. Vui lòng đợi một chút.');
+  const token = battleToken, oldWinner = state.battle?.winner;
+  const battleId = state.battle?.id, revision = state.battle?.revision; let completed = false; remoteBusy = true; selectedUnit = null; render();
+  try {
+    const result = await apiCall('/api/game/battle/action', { ...payload, battleId, revision });
+    if (token !== battleToken || !currentUser) return;
+    if (payload.type === 'end' && result.frames.length > 1) {
+      for (const frame of result.frames) {
+        if (token !== battleToken || !currentUser) return;
+        state = { ...result.profile, battle: frame };
+        if (page === 'battle') { render(); sound(); }
+        await delay(400);
+      }
+    }
+    if (token !== battleToken || !currentUser) return;
+    currentUser = result.user; state = result.profile; remoteBusy = false;
+    completed = true;
+    if (payload.type === 'end' && state.battle.mode === 'local' && state.battle.winner === null) handoff = true;
+    render(); sound(payload.type === 'attack' ? 'attack' : 'click');
+    if (handoff && page === 'battle') showHandoff();
+    if (state.battle.winner !== null && oldWinner === null) finishBattle();
+    else if (page === 'battle') battleFx(payload.type === 'attack' ? 'strike' : payload.type === 'evolve' ? 'evolution' : 'summon', 'nature', payload.type === 'attack' ? 'TẤN CÔNG' : payload.type === 'evolve' ? 'TIẾN HÓA' : '', payload.target || payload.uid);
+  } catch (error) {
+    if (currentUser) { try { const result = await request('/api/me'); state = result.profile; } catch {} }
+    throw error;
+  } finally { if (token === battleToken) { remoteBusy = false; if (!completed && page === 'battle') render(); } }
+}
+function adminPage() {
+  if (currentUser?.role !== 'admin') return `<div class="empty-state">${icon('shield')}<h3>Khu vực quản trị</h3><p>Đăng nhập bằng tài khoản quản trị để truy cập.</p>${button('Đăng nhập', 'auth')}</div>`;
+  return adminContent(admin);
+}
+let adminLoad = 0;
+async function loadAdmin() {
+  if (currentUser?.role !== 'admin') return;
+  const sequence = ++adminLoad; admin.loading = true; admin.error = '';
+  if (page === 'admin') render();
+  try {
+    const results = await Promise.all([apiCall('/api/admin/overview'), apiCall(`/api/admin/users?search=${encodeURIComponent(admin.search)}&page=${admin.page}`)]);
+    if (sequence !== adminLoad || currentUser?.role !== 'admin') return;
+    admin.overview = results[0]; Object.assign(admin, results[1]);
+  } catch (error) { admin.error = error.message; }
+  finally { if (sequence === adminLoad) { admin.loading = false; if (page === 'admin') render(); } }
+}
+async function openAdminUser(id) {
+  admin.selected = await apiCall(`/api/admin/users/${id}`);
+  showModal(adminUserContent(admin.selected, currentUser.id), 'admin-user-modal');
+}
+async function adminMutation(id, operation, data) {
+  if (remoteBusy) throw new Error('Đang lưu thao tác quản trị. Vui lòng đợi.');
+  remoteBusy = true;
+  try {
+    const account = await apiCall(`/api/admin/users/${id}/${operation}`, data);
+    if (id === currentUser.id) {
+      state = account.profile;
+      if (operation === 'reset' || operation === 'cancel-battle') { battleToken++; aiRunning = false; handoff = false; }
+    }
+    admin.selected = account;
+    await loadAdmin(); showModal(adminUserContent(account, currentUser.id), 'admin-user-modal'); sound(); toast('Đã cập nhật và ghi nhật ký quản trị.');
+  } finally { remoteBusy = false; }
+}
+async function refreshSession() {
+  if (remoteBusy || aiRunning || document.hidden || authBusy) return;
+  try {
+    const result = await request('/api/me');
+    const changed = !currentUser || JSON.stringify(result.profile) !== JSON.stringify(state) || result.user.role !== currentUser.role;
+    if (!currentUser) { battleToken++; aiRunning = false; handoff = result.profile.battle?.mode === 'local' && result.profile.battle.winner === null; }
+    currentUser = result.user;
+    if (changed) { state = result.profile; if (!state.battle) { handoff = false; selectedUnit = null; } render(); }
+  } catch (error) { if (error.status === 401 && currentUser) { guestSession(); toast('Phiên đăng nhập đã kết thúc hoặc tài khoản bị khóa.'); } }
+}
 function go(next) {
   page = next; selectedUnit = null; filters = { search: '', element: 'all', rarity: 'all', owned: 'all', sort: 'number' }; render(); window.scrollTo(0, 0);
   if (page === 'battle' && handoff) showHandoff();
   if (page === 'battle') runAi();
+  if (page === 'admin' && currentUser?.role === 'admin') loadAdmin();
 }
 
 document.addEventListener('click', async event => {
   const target = event.target.closest('[data-action]'); if (!target || target.disabled) return;
   const action = target.dataset.action;
   try {
+    if (currentUser) {
+      let payload;
+      if (action === 'play-card') { requireTurn(); payload = { type: 'play', index: Number(target.dataset.index) }; }
+      if (action === 'evolve') { requireTurn(); payload = { type: 'evolve', uid: Number(target.dataset.uid) }; }
+      if (action === 'attack-unit' && selectedUnit) { requireTurn(); payload = { type: 'attack', uid: selectedUnit, target: Number(target.dataset.uid) }; }
+      if (action === 'attack-hero' && selectedUnit) { requireTurn(); payload = { type: 'attack', uid: selectedUnit, target: null }; }
+      if (action === 'end-turn') { requireTurn(); payload = { type: 'end' }; }
+      if (action === 'confirm-surrender') { payload = { type: 'surrender' }; closeModal(); }
+      if (payload) { await onlineBattle(payload); return; }
+    }
     switch (action) {
+      case 'auth': showModal(authContent()); break;
+      case 'auth-tab': if (!authBusy) showModal(authContent(target.dataset.mode === 'register')); break;
+      case 'account': showModal(`<div class="eyebrow">TÀI KHOẢN CỦA BẠN</div><h2>${escape(currentUser.displayName)}</h2><p>@${escape(currentUser.username)} · ${currentUser.role === 'admin' ? 'Quản trị viên' : 'Người chơi'}<br>Tiến trình được lưu trên máy chủ.</p><div class="actions">${currentUser.role === 'admin' ? button('Vào trang quản trị', 'open-admin', '', '', 'shield') : ''}${button('Đăng xuất', 'logout', remoteBusy ? 'disabled' : '', 'secondary')}</div>`); break;
+      case 'open-admin': closeModal(); go('admin'); break;
+      case 'logout': if (!remoteBusy) { await apiCall('/api/auth/logout', {}); guestSession(); toast('Đã đăng xuất. Bạn đang chơi ở chế độ khách.'); } break;
+      case 'admin-refresh': await loadAdmin(); break;
+      case 'admin-page': admin.page = Number(target.dataset.page); await loadAdmin(); break;
+      case 'admin-user': await openAdminUser(target.dataset.id); break;
+      case 'admin-confirm': {
+        const operation = target.dataset.operation, id = target.dataset.id;
+        const label = operation === 'ban' ? admin.selected.user.banned ? 'Mở khóa tài khoản' : 'Khóa tài khoản' : operation === 'reset' ? 'Đặt lại tiến trình' : 'Hủy trận hiện tại';
+        showModal(`<div class="eyebrow">XÁC NHẬN THAO TÁC QUẢN TRỊ</div><h2>${label}?</h2><p>Áp dụng cho <strong>@${escape(admin.selected.user.username)}</strong>. ${operation === 'reset' ? 'Vàng, thẻ, bộ bài và trận đấu sẽ trở về trạng thái khởi đầu.' : operation === 'ban' ? 'Trạng thái tài khoản sẽ thay đổi ngay trên mọi thiết bị.' : 'Trận đấu sẽ kết thúc mà không trao phần thưởng.'}</p><div class="actions">${button(label, 'admin-execute', `data-operation="${operation}" data-id="${id}"`, 'danger')}${button('Hủy', 'close-modal', '', 'secondary')}</div>`); break;
+      }
+      case 'admin-execute': await adminMutation(target.dataset.id, target.dataset.operation, target.dataset.operation === 'ban' ? { banned: !admin.selected.user.banned } : {}); break;
       case 'nav': go(target.dataset.page); break;
       case 'menu': $('.sidebar').classList.add('open'); $('.mobile-overlay').classList.add('open'); break;
       case 'close-menu': $('.sidebar').classList.remove('open'); $('.mobile-overlay').classList.remove('open'); break;
       case 'close-modal': closeModal(); break;
       case 'help': helpModal(); break;
-      case 'sound': state.sound = !state.sound; save(); render(); sound(); toast(state.sound ? 'Đã bật âm thanh.' : 'Đã tắt âm thanh.'); break;
+      case 'sound': if (currentUser) await onlineMutation('/api/game/preferences', { sound: !state.sound }); else state.sound = !state.sound; save(); render(); sound(); toast(state.sound ? 'Đã bật âm thanh.' : 'Đã tắt âm thanh.'); break;
       case 'daily':
+        if (currentUser) { await onlineMutation('/api/game/daily', {}); render(); sound('win'); toast('Đã nhận 300 vàng và lưu vào tài khoản.'); break; }
         if (state.daily === today()) { toast('Bạn đã nhận quà hôm nay. Hẹn gặp lại ngày mai!'); break; }
         state.coins += 300; state.daily = today(); save(); render(); sound('win'); toast('Đã nhận 300 vàng. Chúc bạn mở được thẻ Huyền thoại!'); break;
-      case 'buy-pack': buyPack(target.dataset.pack); break;
+      case 'buy-pack': await buyPack(target.dataset.pack); break;
       case 'flip-card': flipCard(Number(target.dataset.index)); break;
       case 'flip-all': { const opening = packOpening; for (let i = 0; i < 5; i++) { if (!opening || packOpening !== opening) break; flipCard(i); await delay(110); } break; }
       case 'go-collection': closeModal(); go('collection'); break;
@@ -274,14 +400,14 @@ document.addEventListener('click', async event => {
       case 'odds': showModal(`<div class="eyebrow">MINH BẠCH TỪNG LÁ BÀI</div><h2>Cơ hội tìm thấy huyền thoại</h2><p>Mỗi pack có 5 thẻ. Tỉ lệ ngẫu nhiên cơ bản trên mỗi thẻ:</p><table class="odds-table"><tbody>${[['Thường', '56%'], ['Hiếm', '30%'], ['Sử thi', '11,5%'], ['Huyền thoại', '2,5%']].map(([name, value]) => `<tr><td>${name}</td><td>${value}</td></tr>`).join('')}</tbody></table><p>Thẻ thứ 5 được nâng lên ít nhất Hiếm. Riêng pack Thiên Giới nâng lên ít nhất Sử thi. Pack nguyên tố: mỗi lần chọn thẻ có 70% ưu tiên hệ của pack, còn lại chọn trong toàn bộ các hệ.</p><p>Thẻ có thể trùng. Không dùng tiền thật. Mọi pack và vàng chỉ có giá trị trong trò chơi này.</p>${button('Đã hiểu', 'close-modal')}`); break;
       case 'detail': detailModal(target.dataset.id); break;
       case 'filter-element': filters.element = target.dataset.element; render(); break;
-      case 'add-deck': addToDeck(target.dataset.id); break;
-      case 'remove-deck': { const index = state.deck.indexOf(target.dataset.id); if (index >= 0) state.deck.splice(index, 1); save(); render(); break; }
+      case 'add-deck': await addToDeck(target.dataset.id); break;
+      case 'remove-deck': { const deck = [...state.deck], index = deck.indexOf(target.dataset.id); if (index >= 0) deck.splice(index, 1); if (currentUser) await onlineMutation('/api/game/deck', { deck }); else state.deck = deck; save(); render(); break; }
       case 'reset-deck': showModal(`<div class="eyebrow">BỘ BÀI KHỞI ĐẦU</div><h2>Trở về điểm xuất phát?</h2><p>Thay bộ bài hiện tại bằng 20 thẻ khởi đầu. Tất cả thẻ trong bộ sưu tập vẫn được giữ nguyên.</p><div class="actions">${button('Khôi phục bộ bài', 'confirm-reset', '', '', 'refresh')}${button('Giữ bộ bài hiện tại', 'close-modal', '', 'secondary')}</div>`); break;
-      case 'confirm-reset': state.deck = [...STARTER_DECK]; save(); closeModal(); render(); toast('Đã khôi phục bộ bài khởi đầu.'); break;
+      case 'confirm-reset': if (currentUser) await onlineMutation('/api/game/deck', { deck: STARTER_DECK }); else state.deck = [...STARTER_DECK]; save(); closeModal(); render(); toast('Đã khôi phục bộ bài khởi đầu.'); break;
       case 'start-menu': startMenu(); break;
       case 'choose-mode': chooseMode(); break;
       case 'resume-battle': closeModal(); go('battle'); break;
-      case 'new-battle': newBattle(target.dataset.mode); break;
+      case 'new-battle': await newBattle(target.dataset.mode); break;
       case 'accept-turn': handoff = false; closeModal(); render(); break;
       case 'play-card': {
         const side = requireTurn(); const b = state.battle; const card = playCard(b, Number(target.dataset.index), side); selectedUnit = null; sound(); const uid = b.players[side].board.at(-1)?.uid; afterAction('summoned', uid); battleFx(card.type === 'spell' ? 'spell' : 'summon', card.element, card.type === 'spell' ? card.name : 'TRIỆU HỒI', uid); break;
@@ -306,6 +432,26 @@ document.addEventListener('click', async event => {
     }
   } catch (error) { toast(error.message || 'Có lỗi xảy ra. Vui lòng thử lại.'); }
 });
+document.addEventListener('submit', async event => {
+  const form = event.target.closest('[data-form]'); if (!form) return; event.preventDefault();
+  const data = Object.fromEntries(new FormData(form));
+  if (form.dataset.form === 'auth') {
+    if (authBusy) return; authBusy = true;
+    const submit = form.querySelector('[type="submit"]'); submit.disabled = true;
+    try {
+      const result = await request(`/api/auth/${form.dataset.mode}`, data);
+      battleToken++; aiRunning = false; handoff = result.profile.battle?.mode === 'local' && result.profile.battle.winner === null; currentUser = result.user; state = result.profile; closeModal();
+      toast('Đăng nhập thành công. Tiến trình đang lưu trên máy chủ.'); go(currentUser.role === 'admin' ? 'admin' : 'home');
+    } catch (error) { if ($('#auth-error')) $('#auth-error').textContent = error.message; }
+    finally { authBusy = false; submit.disabled = false; }
+    return;
+  }
+  try {
+    if (form.dataset.form === 'admin-search') { admin.search = data.search.trim(); admin.page = 1; await loadAdmin(); }
+    if (form.dataset.form === 'admin-gold') await adminMutation(form.dataset.id, 'gold', { amount: Number(data.amount) * Number(event.submitter.value) });
+    if (form.dataset.form === 'admin-cards') await adminMutation(form.dataset.id, 'cards', { cardId: data.cardId, quantity: Number(data.quantity) });
+  } catch (error) { toast(error.message); }
+});
 document.addEventListener('input', event => {
   if (event.target.id !== 'card-search') return;
   filters.search = event.target.value;
@@ -329,4 +475,6 @@ document.addEventListener('keydown', event => {
   }
 });
 render();
+refreshSession();
+setInterval(refreshSession, 15000);
 if (state.battle?.mode === 'ai' && state.battle.turn === 1 && state.battle.winner === null) runAi();
